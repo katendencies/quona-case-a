@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
 import requests
+import json
 
 st.set_page_config(page_title="Quona Case A - Africa Fintech Sourcing", layout="wide")
 st.title("Africa Fintech Sourcing Engine - Case A")
-st.caption("Quona Capital | Summer Associate 2026 | Live Notion Sync")
 
 SYNDICATE = [
     "Partech Africa", "TLcom Capital", "QED Investors", "4Di Capital",
@@ -14,10 +14,10 @@ SYNDICATE = [
 # Sidebar Inputs
 st.sidebar.header("1. Connect to Notion CRM")
 NOTION_TOKEN = st.sidebar.text_input("Notion Integration Token", type="password")
-DATABASE_ID = st.sidebar.text_input("Notion Database ID")
+DATABASE_ID = st.sidebar.text_input("Notion Database ID", value="1dfab0f891624805b48c07a932725b29")
 
 st.sidebar.header("2. Filters")
-selected_syndicate = st.sidebar.multiselect("Syndicate Filter", SYNDICATE, default=SYNDICATE)
+selected_syndicate = st.sidebar.multiselect("Syndicate Filter", SYNDICATE, default=["Partech Africa", "TLcom Capital"])
 min_score = st.sidebar.slider("Min Quona Score", 0.0, 10.0, 0.0, 0.5)
 
 def fetch_notion_data(token, db_id):
@@ -30,97 +30,92 @@ def fetch_notion_data(token, db_id):
 
     response = requests.post(url, headers=headers)
     if response.status_code != 200:
-        st.error(f"Failed to connect to Notion: {response.text}")
-        return []
+        st.error(f"Failed to connect: {response.status_code} {response.text}")
+        return [], []
 
     data = response.json().get("results", [])
 
+    # We return the raw data too so we can debug exactly what column names Notion is sending
     parsed_data = []
+
+    if not data:
+        return parsed_data, data
+
     for item in data:
         props = item.get("properties", {})
 
-        # Safe extraction helpers
-        def get_title(prop_name):
-            try: return props.get(prop_name, {}).get("title", [{}])[0].get("plain_text", "")
-            except: return ""
+        # Super aggressive fallback extraction - grabs data no matter what the column type is in Notion
+        def extract_any(prop_dict):
+            if not prop_dict: return ""
+            for key in ["title", "rich_text"]:
+                if key in prop_dict and len(prop_dict[key]) > 0:
+                    return prop_dict[key][0].get("plain_text", "")
+            if "select" in prop_dict and prop_dict["select"]:
+                return prop_dict["select"].get("name", "")
+            if "multi_select" in prop_dict:
+                return ", ".join([x.get("name", "") for x in prop_dict["multi_select"]])
+            if "number" in prop_dict:
+                return prop_dict["number"]
+            if "url" in prop_dict:
+                return prop_dict["url"]
+            return ""
 
-        def get_select(prop_name):
-            try: return props.get(prop_name, {}).get("select", {}).get("name", "")
-            except: return ""
+        # Map dynamically based on whatever columns actually exist
+        row = {}
+        has_name = False
 
-        def get_multi_select(prop_name):
-            try: return ", ".join([x.get("name", "") for x in props.get(prop_name, {}).get("multi_select", [])])
-            except: return ""
+        for col_name, col_data in props.items():
+            val = extract_any(col_data)
+            row[col_name] = val
+            if 'name' in col_name.lower() or 'company' in col_name.lower():
+                has_name = True
+                row['Company'] = val # Force a standard Company column
 
-        def get_number(prop_name):
-            try: return props.get(prop_name, {}).get("number", 0)
-            except: return 0
-
-        # Map to standard schema
-        row = {
-            "Company": get_title("Company Name"),
-            "HQ Country": get_select("HQ Country"),
-            "Sector": get_select("Sector"),
-            "Investors": get_multi_select("Investors"),
-            "Market Score": get_number("Market Score (1-10)"),
-            "Traction Score": get_number("Traction Score (1-10)"),
-            "Founder Score": get_number("Founder Score (1-10)"),
-            "Position Score": get_number("Position Score (1-10)")
-        }
-
-        # Calculate Quona Score dynamically based on pulled metrics
-        m, t, f, p = row["Market Score"], row["Traction Score"], row["Founder Score"], row["Position Score"]
-        if m and t and f and p:
-            row["Quona Score"] = round((m + t + f + p) / 4, 2)
-        else:
-            row["Quona Score"] = 0.0
-
-        # Only add rows that actually have a Company Name
-        if row["Company"]:
+        # Only keep rows that aren't totally empty
+        if has_name or len([v for v in row.values() if v]) > 2:
             parsed_data.append(row)
 
-    return parsed_data
+    return parsed_data, data
 
 # Main Execution Logic
 if st.sidebar.button("Sync Live Data from Notion", type="primary"):
     if NOTION_TOKEN and DATABASE_ID:
         with st.spinner("Fetching live data from Notion CRM..."):
-            raw_data = fetch_notion_data(NOTION_TOKEN, DATABASE_ID)
+            parsed_data, raw_data = fetch_notion_data(NOTION_TOKEN, DATABASE_ID)
 
-            if raw_data:
-                df = pd.DataFrame(raw_data)
+            if parsed_data:
+                df = pd.DataFrame(parsed_data)
 
-                # Apply Filters safely handling None values
-                filtered = df[
-                    df["Investors"].fillna("").apply(lambda x: any(s in str(x) for s in selected_syndicate)) &
-                    (df["Quona Score"] >= min_score)
-                ].sort_values("Quona Score", ascending=False)
+                # --- FLEXIBLE FILTERING ---
+                # Find which column contains the investors
+                investor_col = next((c for c in df.columns if 'investor' in c.lower() or 'syndicate' in c.lower()), None)
 
-                # Metrics
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Companies in CRM", len(df))
-                col2.metric("Qualified Pipeline", len(filtered))
-                col3.metric("Top Pick Score", filtered["Quona Score"].max() if len(filtered) > 0 else 0)
+                if investor_col:
+                    filtered = df[df[investor_col].fillna("").astype(str).apply(lambda x: any(s in x for s in selected_syndicate))]
+                else:
+                    filtered = df
 
-                # Display Top Pick
-                if len(filtered) > 0:
-                    st.success(f"🏆 Top Ranked Pick: **{filtered.iloc[0]['Company']}** (Score: {filtered.iloc[0]['Quona Score']})")
+                # Try to calculate score if score columns exist
+                score_cols = [c for c in df.columns if 'score' in c.lower() and 'quona' not in c.lower()]
+                if len(score_cols) > 0:
+                    # Convert to numeric
+                    for c in score_cols:
+                        filtered[c] = pd.to_numeric(filtered[c], errors='coerce').fillna(0)
 
-                # Display Table
-                st.subheader("Live Sourcing Pipeline")
-                st.dataframe(filtered, use_container_width=True, hide_index=True)
+                    filtered['Calculated Score'] = filtered[score_cols].sum(axis=1) / len(score_cols)
+                    filtered = filtered[filtered['Calculated Score'] >= min_score].sort_values('Calculated Score', ascending=False)
 
-                # Export option
-                csv = filtered.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Export Pipeline to CSV",
-                    data=csv,
-                    file_name="quona_notion_export.csv",
-                    mime="text/csv",
-                )
+                st.success(f"✅ Successfully loaded {len(filtered)} rows!")
+                st.dataframe(filtered, use_container_width=True)
+
+                # Debug expander
+                with st.expander("Debug: See Raw Columns from Notion"):
+                    st.write("Columns found in your database:", df.columns.tolist())
+
             else:
-                st.info("No data found or columns didn't match. Check Notion database format.")
+                st.error("Connection successful, but database appears empty. Add a row in Notion first!")
+                if raw_data:
+                    with st.expander("Raw API Response"):
+                        st.json(raw_data)
     else:
         st.warning("⚠️ Please enter your Notion Token and Database ID in the sidebar first.")
-else:
-    st.info("👈 Enter your Notion credentials in the sidebar and click **Sync Live Data** to begin.")
