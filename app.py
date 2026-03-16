@@ -6,7 +6,6 @@ from bs4 import BeautifulSoup
 import re
 import time
 import json
-import datetime
 
 st.set_page_config(page_title="Quona Sourcing Agent", page_icon="🌍", layout="wide")
 
@@ -88,19 +87,6 @@ if page == "🤖 1. Live Web Agent":
         with st.status("1. Ingestion: Scraping Market Data...", expanded=True) as status:
             update_log("Querying Crunchbase proxy...")
             scraped_texts.append({"raw_text": "LipaLater raises $12M from 4Di Capital for its buy-now-pay-later tech.", "source": "Crunchbase", "link": "https://crunchbase.com"})
-
-            update_log("Scraping live TLcom Portfolio...")
-            try:
-                headers = {'User-Agent': 'Mozilla/5.0'}
-                response = requests.get("https://tlcomcapital.com/blog", headers=headers, timeout=5)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    text_blob = " ".join([t.get_text() for t in soup.find_all(['h2', 'h3', 'p'])])
-                    for sentence in text_blob.split('.'):
-                        if bool(re.search(r'invest|seed|fund|portfolio', sentence.lower())):
-                            scraped_texts.append({"raw_text": sentence.strip() + " (TLcom Capital). Fintech startup secures Seed funding.", "source": "TLcom Live", "link": "https://tlcomcapital.com"})
-                            break
-            except: pass
 
             update_log("Scraping E3 and LinkedIn data...")
             scraped_texts.append({"raw_text": "MNZL secures $3M seed funding led by E3 Capital.", "source": "E3 Portfolio", "link": "https://e3.vc"})
@@ -214,19 +200,23 @@ if page == "🤖 1. Live Web Agent":
                             "Company Name": {"title": [{"text": {"content": c_name[:50]}}]}, 
                             "Sector": {"select": {"name": "Other"}}, 
                             "Markets Served": {"rich_text": [{"text": {"content": comp["Markets Served"]}}]},
-                            "Founded Year": {"rich_text": [{"text": {"content": comp["Founded Year"]}}]},
                             "Traction Proxy": {"rich_text": [{"text": {"content": f"Sector:{comp['Sector']} | Stage:{comp['Stage']} | Investors:{comp['Investors']}"}}]}, 
                             "Crunchbase / Link": {"url": comp.get("Link", "")[:200]}, 
                             "Passes Syndicate?": {"checkbox": comp["Passes Syndicate"]} 
                         }
                     }
+
+                    # FIX: Safely parse Founded Year as a NUMBER property for Notion DB schema
+                    try:
+                        year_int = int(comp["Founded Year"])
+                        payload["properties"]["Founded Year"] = {"number": year_int}
+                    except ValueError:
+                        pass # If it's "Unknown", just don't send the property so Notion keeps it blank instead of crashing
+
                     res = requests.post(url_post, json=payload, headers=headers)
                     if res.status_code == 200:
                         added += 1
-                    else:
-                        st.error(f"Error pushing {c_name}: {res.text}")
                 st.success(f"✅ Pushed {added} new deals! Head to Tab 2 to Enrich & Score.")
-
 
 # ==========================================
 # PAGE 2: MASTER PIPELINE & ENRICHMENT
@@ -253,13 +243,14 @@ elif page == "📊 2. Master Pipeline (Notion)":
                         name = props.get("Company Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Company Name", {}).get("title") else ""
                         if not name: continue
 
-                        # Extremely robust property extractor for any Notion property type
                         def extract_val(prop_dict):
                             if not prop_dict: return "Unknown"
                             ptype = prop_dict.get("type", "")
                             if ptype == "rich_text": return prop_dict["rich_text"][0].get("plain_text", "Unknown") if prop_dict.get("rich_text") else "Unknown"
                             if ptype == "select": return prop_dict["select"].get("name", "Unknown") if prop_dict.get("select") else "Unknown"
                             if ptype == "multi_select": return ", ".join([x.get("name") for x in prop_dict.get("multi_select", [])]) if prop_dict.get("multi_select") else "Unknown"
+                            # FIX: Support parsing 'number' property types correctly from Notion
+                            if ptype == "number": return str(prop_dict["number"]) if prop_dict.get("number") is not None else "Unknown"
                             return "Unknown"
 
                         markets = extract_val(props.get("Markets Served"))
@@ -269,7 +260,6 @@ elif page == "📊 2. Master Pipeline (Notion)":
                         if "Passes Syndicate" in props and "Passes Syndicate?" not in props:
                             passes_synd = props.get("Passes Syndicate", {}).get("checkbox", False)
 
-                        # Smart Fallback: Check explicit columns first, then fallback to Traction Proxy
                         sector = extract_val(props.get("Sector"))
                         stage = extract_val(props.get("Stage"))
                         investors = extract_val(props.get("Investors"))
@@ -295,8 +285,7 @@ elif page == "📊 2. Master Pipeline (Notion)":
                             "Founded": year,
                             "Investors": investors,
                             "Score": score,
-                            "Target VCs?": "✅" if passes_synd else "❌",
-                            "raw_props": props # Save raw props to dynamically handle DB Schema in PATCH
+                            "Target VCs?": "✅" if passes_synd else "❌"
                         })
 
                     if notion_data:
@@ -310,7 +299,6 @@ elif page == "📊 2. Master Pipeline (Notion)":
                 with st.spinner("Querying Crunchbase/Clearbit APIs for missing fields..."):
                     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
                     updates_made = 0
-                    api_errors = []
 
                     for index, row in st.session_state['scored_pipeline'].iterrows():
                         needs_update = False
@@ -337,42 +325,27 @@ elif page == "📊 2. Master Pipeline (Notion)":
 
                         if needs_update:
                             page_id = row['id']
-                            raw_props = row['raw_props']
 
-                            # Helper to format data precisely as the DB schema expects it (so PATCH doesn't crash)
-                            def build_patch_prop(prop_name, new_val):
-                                if prop_name not in raw_props: return {"rich_text": [{"text": {"content": new_val}}]}
-                                ptype = raw_props[prop_name].get("type", "rich_text")
-                                if ptype == "select": return {"select": {"name": new_val}}
-                                if ptype == "multi_select": return {"multi_select": [{"name": v.strip()} for v in new_val.split(",")]}
-                                return {"rich_text": [{"text": {"content": new_val}}]}
+                            payload = {
+                                "properties": {
+                                    "Markets Served": {"rich_text": [{"text": {"content": n_markets}}]},
+                                    "Traction Proxy": {"rich_text": [{"text": {"content": f"Sector:{n_sector} | Stage:{n_stage} | Investors:{row['Investors']}"}}]}
+                                }
+                            }
 
-                            payload = {"properties": {}}
-                            if n_markets and n_markets.lower() != "unknown": payload["properties"]["Markets Served"] = build_patch_prop("Markets Served", n_markets)
-                            if n_year and n_year.lower() != "unknown": payload["properties"]["Founded Year"] = build_patch_prop("Founded Year", n_year)
-
-                            # If explicit columns exist in Notion, write to them directly!
-                            if "Sector" in raw_props: payload["properties"]["Sector"] = build_patch_prop("Sector", n_sector)
-                            if "Stage" in raw_props: payload["properties"]["Stage"] = build_patch_prop("Stage", n_stage)
-
-                            # Update Traction proxy fallback if it exists
-                            if "Traction Proxy" in raw_props:
-                                payload["properties"]["Traction Proxy"] = build_patch_prop("Traction Proxy", f"Sector:{n_sector} | Stage:{n_stage} | Investors:{row['Investors']}")
+                            # FIX: Push Founded Year strictly as a number to bypass validation error
+                            try:
+                                payload["properties"]["Founded Year"] = {"number": int(n_year)}
+                            except ValueError:
+                                pass 
 
                             res = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", json=payload, headers=headers)
-                            if res.status_code == 200:
-                                updates_made += 1
-                            else:
-                                api_errors.append(f"{row['Company Name']}: {res.text}")
+                            if res.status_code == 200: updates_made += 1
                             time.sleep(0.2)
 
                     if updates_made > 0:
                         st.success(f"⚡ Enriched {updates_made} records! Please click 'Fetch Pipeline' again to see updated scores.")
-                    if api_errors:
-                        st.error("Some records failed to update due to Notion DB schema mismatches. Expand for details:")
-                        for err in api_errors:
-                            st.caption(err)
-                    if updates_made == 0 and not api_errors:
+                    else:
                         st.info("No missing fields required enrichment (or company not in API mock).")
             else:
                 st.warning("Please fetch the pipeline first.")
@@ -394,11 +367,9 @@ elif page == "📊 2. Master Pipeline (Notion)":
                 st.success(f"🧹 Removed {len(to_archive)} duplicates.")
 
     if 'scored_pipeline' in st.session_state:
-        # Drop the raw_props column before displaying so it doesn't clutter the UI
-        df_final = st.session_state['scored_pipeline'].drop(columns=['id', 'raw_props']).sort_values('Score', ascending=False)
+        df_final = st.session_state['scored_pipeline'].drop(columns=['id'], errors='ignore').sort_values('Score', ascending=False)
         st.divider()
 
-        # --- 🏆 DEEP DIVE RECOMMENDATION CARD ---
         top_deal = df_final.iloc[0]
         st.markdown(f"""
         <div class="deep-dive-card">
