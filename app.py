@@ -17,14 +17,14 @@ NOTION_TOKEN = st.sidebar.text_input("Notion Integration Token", type="password"
 DATABASE_ID = st.sidebar.text_input("Notion Database ID", value="1dfab0f891624805b48c07a932725b29")
 
 st.sidebar.header("2. Filters")
-selected_syndicate = st.sidebar.multiselect("Syndicate Filter", SYNDICATE, default=["Partech Africa", "TLcom Capital"])
+selected_syndicate = st.sidebar.multiselect("Syndicate Filter", SYNDICATE, default=[]) # Empty default so everything shows
 min_score = st.sidebar.slider("Min Quona Score", 0.0, 10.0, 0.0, 0.5)
 
 def fetch_notion_data(token, db_id):
     url = f"https://api.notion.com/v1/databases/{db_id}/query"
     headers = {
         "Authorization": f"Bearer {token}",
-        "Notion-Version": "2022-06-28",
+        "Notion-Version": "2022-06-28", # CRITICAL: Needs this exact version string
         "Content-Type": "application/json"
     }
 
@@ -35,7 +35,6 @@ def fetch_notion_data(token, db_id):
 
     data = response.json().get("results", [])
 
-    # We return the raw data too so we can debug exactly what column names Notion is sending
     parsed_data = []
 
     if not data:
@@ -44,35 +43,44 @@ def fetch_notion_data(token, db_id):
     for item in data:
         props = item.get("properties", {})
 
-        # Super aggressive fallback extraction - grabs data no matter what the column type is in Notion
-        def extract_any(prop_dict):
-            if not prop_dict: return ""
-            for key in ["title", "rich_text"]:
-                if key in prop_dict and len(prop_dict[key]) > 0:
-                    return prop_dict[key][0].get("plain_text", "")
-            if "select" in prop_dict and prop_dict["select"]:
-                return prop_dict["select"].get("name", "")
-            if "multi_select" in prop_dict:
-                return ", ".join([x.get("name", "") for x in prop_dict["multi_select"]])
-            if "number" in prop_dict:
-                return prop_dict["number"]
-            if "url" in prop_dict:
-                return prop_dict["url"]
-            return ""
+        # Deep parser for Notion's nested property types
+        def extract_value(prop):
+            prop_type = prop.get("type", "")
+            if prop_type == "title":
+                return "".join([t.get("plain_text", "") for t in prop.get("title", [])])
+            elif prop_type == "rich_text":
+                return "".join([t.get("plain_text", "") for t in prop.get("rich_text", [])])
+            elif prop_type == "select" and prop.get("select"):
+                return prop["select"].get("name", "")
+            elif prop_type == "multi_select":
+                return ", ".join([x.get("name", "") for x in prop.get("multi_select", [])])
+            elif prop_type == "number":
+                return prop.get("number")
+            elif prop_type == "url":
+                return prop.get("url", "")
+            elif prop_type == "checkbox":
+                return prop.get("checkbox", False)
+            elif prop_type == "date" and prop.get("date"):
+                return prop["date"].get("start", "")
+            return None
 
-        # Map dynamically based on whatever columns actually exist
+        # Map exactly what comes back
         row = {}
-        has_name = False
+        has_content = False
 
-        for col_name, col_data in props.items():
-            val = extract_any(col_data)
+        for col_name, prop_data in props.items():
+            val = extract_value(prop_data)
+            if val is not None and val != "" and val != False:
+                has_content = True
             row[col_name] = val
-            if 'name' in col_name.lower() or 'company' in col_name.lower():
-                has_name = True
-                row['Company'] = val # Force a standard Company column
 
-        # Only keep rows that aren't totally empty
-        if has_name or len([v for v in row.values() if v]) > 2:
+        # Guarantee a standard "Company" column for display purposes
+        title_col = next((k for k, v in props.items() if v.get("type") == "title"), None)
+        if title_col:
+            row["Company"] = extract_value(props[title_col])
+
+        # Only append if the row isn't completely empty
+        if has_content and row.get("Company"):
             parsed_data.append(row)
 
     return parsed_data, data
@@ -86,36 +94,27 @@ if st.sidebar.button("Sync Live Data from Notion", type="primary"):
             if parsed_data:
                 df = pd.DataFrame(parsed_data)
 
-                # --- FLEXIBLE FILTERING ---
-                # Find which column contains the investors
-                investor_col = next((c for c in df.columns if 'investor' in c.lower() or 'syndicate' in c.lower()), None)
+                # Filter by syndicate if selected
+                if len(selected_syndicate) > 0:
+                    investor_col = next((c for c in df.columns if 'investor' in c.lower() or 'syndicate' in c.lower()), None)
+                    if investor_col:
+                        df = df[df[investor_col].fillna("").astype(str).apply(lambda x: any(s.lower() in x.lower() for s in selected_syndicate))]
 
-                if investor_col:
-                    filtered = df[df[investor_col].fillna("").astype(str).apply(lambda x: any(s in x for s in selected_syndicate))]
-                else:
-                    filtered = df
-
-                # Try to calculate score if score columns exist
+                # Attempt to score
                 score_cols = [c for c in df.columns if 'score' in c.lower() and 'quona' not in c.lower()]
                 if len(score_cols) > 0:
-                    # Convert to numeric
                     for c in score_cols:
-                        filtered[c] = pd.to_numeric(filtered[c], errors='coerce').fillna(0)
+                        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+                    df['Calculated Score'] = df[score_cols].sum(axis=1) / len(score_cols)
+                    df = df[df['Calculated Score'] >= min_score].sort_values('Calculated Score', ascending=False)
 
-                    filtered['Calculated Score'] = filtered[score_cols].sum(axis=1) / len(score_cols)
-                    filtered = filtered[filtered['Calculated Score'] >= min_score].sort_values('Calculated Score', ascending=False)
-
-                st.success(f"✅ Successfully loaded {len(filtered)} rows!")
-                st.dataframe(filtered, use_container_width=True)
-
-                # Debug expander
-                with st.expander("Debug: See Raw Columns from Notion"):
-                    st.write("Columns found in your database:", df.columns.tolist())
+                if len(df) > 0:
+                    st.success(f"✅ Successfully loaded {len(df)} companies!")
+                    st.dataframe(df, use_container_width=True)
+                else:
+                    st.warning("Data found, but none matched your current filters.")
 
             else:
-                st.error("Connection successful, but database appears empty. Add a row in Notion first!")
-                if raw_data:
-                    with st.expander("Raw API Response"):
-                        st.json(raw_data)
+                st.error("No valid data rows found. Ensure you pasted the companies into the Notion Database!")
     else:
         st.warning("⚠️ Please enter your Notion Token and Database ID in the sidebar first.")
