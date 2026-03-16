@@ -35,22 +35,19 @@ page = st.sidebar.radio("Sourcing Engine Navigation", ["🤖 1. Live Web Agent",
 
 if page == "🤖 1. Live Web Agent":
     st.title("Smarter Autonomous Sourcing")
-    st.markdown("This version features **Semantic Deal Filtering** (only pulls news about funding/raises) and **Deterministic Fallbacks** (bypasses LLM rate limits to ensure target VCs are correctly tagged).")
+    st.markdown("This version features **Semantic Deal Filtering** and **Deterministic Fallbacks**.")
 
     col1, col2 = st.columns(2)
     with col1:
         rss_depth = st.slider("RSS Feed Depth (How far back to scan)", min_value=5, max_value=30, value=15)
     with col2:
-        strict_gate = st.checkbox("Show ONLY Quona Syndicate Deals (Uncheck to see all market deals)", value=False)
+        strict_gate = st.checkbox("Show ONLY Quona Syndicate Deals", value=False)
 
     if st.button("🚀 Deploy Smart Agent", type="primary"):
         scraped_texts = []
 
         with st.status("1. Ingestion: Smart Scraping for Deal Activity...", expanded=True) as status:
-            # 1. PROPRIETARY DATABASES
             scraped_texts.append({"raw_text": "LipaLater raises $12M from 4Di Capital", "source": "Crunchbase Proxy", "link": "https://crunchbase.com"})
-
-            # 2. VC PORTFOLIOS 
             try:
                 headers = {'User-Agent': 'Mozilla/5.0'}
                 response = requests.get("https://tlcomcapital.com/blog", headers=headers, timeout=5)
@@ -63,11 +60,8 @@ if page == "🤖 1. Live Web Agent":
                             break
             except: pass
             scraped_texts.append({"raw_text": "MNZL secures $3M seed funding led by E3 Capital", "source": "E3 Portfolio Scrape", "link": "https://e3.vc"})
-
-            # 3. LINKEDIN
             scraped_texts.append({"raw_text": "We are thrilled to announce our Seed round led by Novastar Ventures! - Union54", "source": "LinkedIn Scrape", "link": "https://linkedin.com"})
 
-            # 4. & 5. SMART RSS FEEDS (Only keeping items with funding keywords)
             all_feeds = {
                 "TechCrunch Africa": "https://techcrunch.com/category/africa/feed/", 
                 "Disrupt Africa": "https://disrupt-africa.com/feed/",
@@ -75,7 +69,6 @@ if page == "🤖 1. Live Web Agent":
                 "WeeTracker (Beyond)": "https://weetracker.com/feed/"
             }
 
-            st.write("📡 Scanning live RSS for keywords: *raise, fund, seed, invest, series, capital*...")
             for source_name, feed_url in all_feeds.items():
                 try:
                     res = requests.get(f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(feed_url)}").json()
@@ -83,7 +76,6 @@ if page == "🤖 1. Live Web Agent":
                         items = res.get('items', [])[:rss_depth]
                         for item in items:
                             raw = f"{item.get('title')} - {item.get('description')}"
-                            # SMART FILTER: Only grab articles about funding!
                             if bool(re.search(r'raise|fund|seed|invest|series|capital|venture', raw.lower())):
                                 scraped_texts.append({"raw_text": raw[:250]+"...", "source": source_name, "link": item.get('link')})
                 except: pass
@@ -97,11 +89,9 @@ if page == "🤖 1. Live Web Agent":
             processed_deals = []
 
             for item in scraped_texts:
-                # DEFAULT VALUES
                 company = "Unknown"
                 investors = "Undisclosed"
 
-                # Try LLM
                 prompt = f"""Extract JSON keys: "Company Name", "Investors" from text. If no investor, "Undisclosed". Text: {item['raw_text']} JSON:"""
                 try:
                     hf_res = requests.post(HF_API_URL, headers={"Content-Type": "application/json"}, json={"inputs": prompt, "parameters": {"max_new_tokens": 80, "return_full_text": False}}, timeout=3)
@@ -112,20 +102,14 @@ if page == "🤖 1. Live Web Agent":
                         investors = extracted.get("Investors", "Undisclosed")
                 except: pass
 
-                # --- SMART FALLBACK ---
-                # If the free LLM API fails or rate limits, we use Deterministic NLP to find the Syndicate VCs
                 raw_lower = item['raw_text'].lower()
                 matched_vcs = [vc.title() for vc in TARGET_INVESTORS if vc.lower() in raw_lower]
+                if matched_vcs: investors = ", ".join(matched_vcs) 
 
-                if matched_vcs:
-                    investors = ", ".join(matched_vcs) # Override with correct syndicate VC
-
-                # Simple NLP to guess Company Name if LLM failed
                 if company == "Unknown":
                     words = item['raw_text'].split()
-                    if len(words) > 0: company = words[0].replace('"', '').replace("'", "") # Best guess first word
+                    if len(words) > 0: company = words[0].replace('"', '').replace("'", "") 
 
-                # Apply Syndicate Logic
                 passes_syndicate = any(target.lower() in investors.lower() for target in TARGET_INVESTORS)
 
                 processed_deals.append({
@@ -136,29 +120,61 @@ if page == "🤖 1. Live Web Agent":
                     "Link": item['link'],
                     "_passes": passes_syndicate
                 })
-                time.sleep(0.2)
 
             status2.update(label=f"Processing complete!", state="complete", expanded=False)
 
-        # FINAL OUTPUT TABLE
         st.subheader("Final Validated Deal Pipeline")
-
         df_final = pd.DataFrame(processed_deals)
-
-        if strict_gate:
-            df_final = df_final[df_final["_passes"] == True]
-            st.info("Filtering applied: Showing ONLY deals containing Quona Target Investors.")
-        else:
-            st.info("Showing ALL funding deals detected in the market. Check the 'Quona Syndicate?' column for target matches.")
-
+        if strict_gate: df_final = df_final[df_final["_passes"] == True]
         df_final = df_final.drop(columns=["_passes"]).drop_duplicates(subset=["Company Name"])
         st.dataframe(df_final, column_config={"Link": st.column_config.LinkColumn("Source")}, use_container_width=True, hide_index=True)
-
         st.session_state['agent_results'] = df_final.to_dict('records')
+
+    # Add the Notion push button to the Live Web Agent page if there are results
+    if 'agent_results' in st.session_state and len(st.session_state['agent_results']) > 0:
+        if st.button("📥 Push Deals to Notion Database", type="primary"):
+            with st.spinner("Writing to Notion API..."):
+                url = "https://api.notion.com/v1/pages"
+                headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+                for comp in st.session_state['agent_results']:
+                    # Only push to Notion if it's a Quona syndicate target
+                    if comp.get("Quona Syndicate?") == "✅ Yes":
+                        payload = {"parent": {"database_id": DATABASE_ID}, "properties": {"Company Name": {"title": [{"text": {"content": comp["Company Name"][:50]}}]}, "Sector": {"select": {"name": "Other"}}, "Traction Proxy": {"rich_text": [{"text": {"content": f"Sourced via: {comp['Primary Source']}"}}]}, "Crunchbase / Link": {"url": comp.get("Link", "")}, "Passes Syndicate?": {"checkbox": True} }}
+                        requests.post(url, json=payload, headers=headers)
+                st.success("✅ Syndicate Deals securely injected into Quona's Notion ecosystem!")
 
 elif page == "📊 2. Master Pipeline (Notion)":
     st.title("Africa Fintech Sourcing Engine")
     st.markdown("Live feed of the ultimate target pipeline synced directly from Notion via API.")
 
+    if st.button("🔄 Sync Live Data from Notion", type="primary"):
+        with st.spinner("Fetching data from Notion..."):
+            url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+            headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
+            response = requests.post(url, headers=headers)
+            if response.status_code == 200:
+                results = response.json().get("results", [])
+                notion_data = []
+                for i in results:
+                    props = i.get("properties", {})
+                    company = props.get("Company Name", {}).get("title", [{}])
+                    if company:
+                        name = company[0].get("plain_text", "")
+                        source = props.get("Traction Proxy", {}).get("rich_text", [{}])
+                        source_text = source[0].get("plain_text", "") if source else ""
+                        notion_data.append({
+                            "Company Name": name, 
+                            "Source": source_text.replace("Sourced via: ", ""),
+                            "Status": "✅ Verified in CRM"
+                        })
+
+                if notion_data:
+                    st.dataframe(pd.DataFrame(notion_data), use_container_width=True)
+                else:
+                    st.info("The Notion database is currently empty. Run the Live Web Agent to inject deals.")
+            else:
+                st.error("Failed to connect to Notion. Check your API token.")
+
 elif page == "🕒 3. Task Scheduler":
     st.title("🕒 Automated Execution")
+    st.markdown("This interface governs the headless scheduling pipeline.")
