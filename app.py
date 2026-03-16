@@ -34,16 +34,19 @@ st.sidebar.divider()
 page = st.sidebar.radio("Sourcing Engine Navigation", ["🤖 1. Live Web Agent", "📊 2. Master Pipeline (Notion)", "🕒 3. Task Scheduler"])
 
 if page == "🤖 1. Live Web Agent":
-    st.title("Autonomous Sourcing Agent")
-    st.markdown("Executing multi-threaded intelligence gathering across targets to fuel Quona's pipeline.")
+    st.title("Smarter Autonomous Sourcing")
+    st.markdown("This version features **Semantic Deal Filtering** (only pulls news about funding/raises) and **Deterministic Fallbacks** (bypasses LLM rate limits to ensure target VCs are correctly tagged).")
 
-    # We add a slider to let the user control how many articles to scrape
-    scrape_limit = st.slider("Max Articles per RSS Feed (Keep low for fast demo)", min_value=1, max_value=10, value=3)
+    col1, col2 = st.columns(2)
+    with col1:
+        rss_depth = st.slider("RSS Feed Depth (How far back to scan)", min_value=5, max_value=30, value=15)
+    with col2:
+        strict_gate = st.checkbox("Show ONLY Quona Syndicate Deals (Uncheck to see all market deals)", value=False)
 
-    if st.button("🚀 Deploy Multi-Source Agent (Manual Run)", type="primary"):
+    if st.button("🚀 Deploy Smart Agent", type="primary"):
         scraped_texts = []
 
-        with st.status("1. Ingestion: Executing multi-threaded scrape...", expanded=True) as status:
+        with st.status("1. Ingestion: Smart Scraping for Deal Activity...", expanded=True) as status:
             # 1. PROPRIETARY DATABASES
             scraped_texts.append({"raw_text": "LipaLater raises $12M from 4Di Capital", "source": "Crunchbase Proxy", "link": "https://crunchbase.com"})
 
@@ -56,7 +59,7 @@ if page == "🤖 1. Live Web Agent":
                     text_blob = " ".join([t.get_text() for t in soup.find_all(['h2', 'h3', 'p'])])
                     for sentence in text_blob.split('.'):
                         if bool(re.search(r'invest|seed|fund|portfolio', sentence.lower())):
-                            scraped_texts.append({"raw_text": sentence.strip(), "source": "TLcom Portfolio Live", "link": "https://tlcomcapital.com"})
+                            scraped_texts.append({"raw_text": sentence.strip() + " (TLcom Capital)", "source": "TLcom Portfolio Live", "link": "https://tlcomcapital.com"})
                             break
             except: pass
             scraped_texts.append({"raw_text": "MNZL secures $3M seed funding led by E3 Capital", "source": "E3 Portfolio Scrape", "link": "https://e3.vc"})
@@ -64,7 +67,7 @@ if page == "🤖 1. Live Web Agent":
             # 3. LINKEDIN
             scraped_texts.append({"raw_text": "We are thrilled to announce our Seed round led by Novastar Ventures! - Union54", "source": "LinkedIn Scrape", "link": "https://linkedin.com"})
 
-            # 4. & 5. RSS FEEDS
+            # 4. & 5. SMART RSS FEEDS (Only keeping items with funding keywords)
             all_feeds = {
                 "TechCrunch Africa": "https://techcrunch.com/category/africa/feed/", 
                 "Disrupt Africa": "https://disrupt-africa.com/feed/",
@@ -72,51 +75,86 @@ if page == "🤖 1. Live Web Agent":
                 "WeeTracker (Beyond)": "https://weetracker.com/feed/"
             }
 
+            st.write("📡 Scanning live RSS for keywords: *raise, fund, seed, invest, series, capital*...")
             for source_name, feed_url in all_feeds.items():
                 try:
                     res = requests.get(f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(feed_url)}").json()
                     if res.get('status') == 'ok':
-                        for item in res.get('items', [])[:scrape_limit]:
-                            scraped_texts.append({"raw_text": f"{item.get('title')} - {item.get('description')}"[:200]+"...", "source": source_name, "link": item.get('link')})
+                        items = res.get('items', [])[:rss_depth]
+                        for item in items:
+                            raw = f"{item.get('title')} - {item.get('description')}"
+                            # SMART FILTER: Only grab articles about funding!
+                            if bool(re.search(r'raise|fund|seed|invest|series|capital|venture', raw.lower())):
+                                scraped_texts.append({"raw_text": raw[:250]+"...", "source": source_name, "link": item.get('link')})
                 except: pass
 
-            status.update(label=f"Scraping complete. Found {len(scraped_texts)} data points.", state="complete", expanded=False)
+            status.update(label=f"Smart Scrape complete. Found {len(scraped_texts)} targeted deal announcements.", state="complete", expanded=False)
 
-        # SHOW THE RAW SCRAPED DATA BEFORE LLM PROCESSING
         st.subheader(f"Raw Scraped Pipeline ({len(scraped_texts)} items found)")
         st.dataframe(pd.DataFrame(scraped_texts), use_container_width=True)
 
-        with st.status("2. Inference: Extracting Entities via Live LLM...", expanded=True) as status2:
+        with st.status("2. Inference: Extracting Entities (LLM + NLP Fallback)...", expanded=True) as status2:
             processed_deals = []
+
             for item in scraped_texts:
-                prompt = f"""Extract JSON keys: "Company Name", "Sector", "Investors" from text. If no investor, "Undisclosed". Text: {item['raw_text']} JSON:"""
+                # DEFAULT VALUES
+                company = "Unknown"
+                investors = "Undisclosed"
+
+                # Try LLM
+                prompt = f"""Extract JSON keys: "Company Name", "Investors" from text. If no investor, "Undisclosed". Text: {item['raw_text']} JSON:"""
                 try:
-                    hf_res = requests.post(HF_API_URL, headers={"Content-Type": "application/json"}, json={"inputs": prompt, "parameters": {"max_new_tokens": 80, "return_full_text": False}})
+                    hf_res = requests.post(HF_API_URL, headers={"Content-Type": "application/json"}, json={"inputs": prompt, "parameters": {"max_new_tokens": 80, "return_full_text": False}}, timeout=3)
                     if hf_res.status_code == 200:
                         json_str = hf_res.json()[0]['generated_text'].strip().replace("```json", "").replace("```", "")
                         extracted = json.loads(json_str)
-                        processed_deals.append({
-                            "Company Name": extracted.get("Company Name", "Unknown"),
-                            "Investors": extracted.get("Investors", "Undisclosed"),
-                            "Primary Source": item['source'],
-                            "Link": item['link']
-                        })
+                        company = extracted.get("Company Name", "Unknown")
+                        investors = extracted.get("Investors", "Undisclosed")
                 except: pass
-                time.sleep(0.5)
 
-            qualified_deals = []
-            for deal in processed_deals:
-                if any(target.lower() in str(deal["Investors"]).lower() for target in TARGET_INVESTORS):
-                    deal["Passes Syndicate?"] = True
-                    qualified_deals.append(deal)
+                # --- SMART FALLBACK ---
+                # If the free LLM API fails or rate limits, we use Deterministic NLP to find the Syndicate VCs
+                raw_lower = item['raw_text'].lower()
+                matched_vcs = [vc.title() for vc in TARGET_INVESTORS if vc.lower() in raw_lower]
 
-            status2.update(label=f"LLM Processing complete! {len(qualified_deals)} passed the Syndicate Gate.", state="complete", expanded=False)
-            if qualified_deals: st.session_state['agent_results'] = pd.DataFrame(qualified_deals).drop_duplicates(subset=["Company Name"]).to_dict('records')
+                if matched_vcs:
+                    investors = ", ".join(matched_vcs) # Override with correct syndicate VC
 
-    if 'agent_results' in st.session_state and len(st.session_state['agent_results']) > 0:
-        st.subheader("Final Output: Verified Quona Pipeline")
-        st.info("These are the deals that successfully passed the Quona Syndicate logic gate (Target VC was identified).")
-        st.dataframe(pd.DataFrame(st.session_state['agent_results']), column_config={"Link": st.column_config.LinkColumn("Source")}, use_container_width=True, hide_index=True)
+                # Simple NLP to guess Company Name if LLM failed
+                if company == "Unknown":
+                    words = item['raw_text'].split()
+                    if len(words) > 0: company = words[0].replace('"', '').replace("'", "") # Best guess first word
+
+                # Apply Syndicate Logic
+                passes_syndicate = any(target.lower() in investors.lower() for target in TARGET_INVESTORS)
+
+                processed_deals.append({
+                    "Company Name": company,
+                    "Investors / Identified LPs": investors,
+                    "Primary Source": item['source'],
+                    "Quona Syndicate?": "✅ Yes" if passes_syndicate else "❌ No",
+                    "Link": item['link'],
+                    "_passes": passes_syndicate
+                })
+                time.sleep(0.2)
+
+            status2.update(label=f"Processing complete!", state="complete", expanded=False)
+
+        # FINAL OUTPUT TABLE
+        st.subheader("Final Validated Deal Pipeline")
+
+        df_final = pd.DataFrame(processed_deals)
+
+        if strict_gate:
+            df_final = df_final[df_final["_passes"] == True]
+            st.info("Filtering applied: Showing ONLY deals containing Quona Target Investors.")
+        else:
+            st.info("Showing ALL funding deals detected in the market. Check the 'Quona Syndicate?' column for target matches.")
+
+        df_final = df_final.drop(columns=["_passes"]).drop_duplicates(subset=["Company Name"])
+        st.dataframe(df_final, column_config={"Link": st.column_config.LinkColumn("Source")}, use_container_width=True, hide_index=True)
+
+        st.session_state['agent_results'] = df_final.to_dict('records')
 
 elif page == "📊 2. Master Pipeline (Notion)":
     st.title("Africa Fintech Sourcing Engine")
