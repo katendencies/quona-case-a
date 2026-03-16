@@ -22,6 +22,11 @@ st.markdown("""
         background: linear-gradient(135deg, rgba(0, 200, 140, 0.1) 0%, rgba(0, 164, 255, 0.1) 100%);
         border-left: 6px solid #00C88C; padding: 20px; border-radius: 8px; margin-bottom: 20px;
     }
+    .log-terminal {
+        background-color: #1E1E1E; color: #00FF00; font-family: 'Courier New', Courier, monospace;
+        padding: 10px; border-radius: 5px; height: 150px; overflow-y: scroll; font-size: 12px;
+        margin-bottom: 15px; border: 1px solid #333;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -30,13 +35,12 @@ DATABASE_ID = "1dfab0f891624805b48c07a932725b29"
 HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
 TARGET_INVESTORS = ["partech", "tlcom", "4di", "helios", "qed", "novastar", "e3", "briter", "y combinator", "target global", "founders factory"]
 
-# Mock Enrichment Database (Simulating Clearbit/Crunchbase API)
+# Mock Enrichment Database
 ENRICHMENT_API = {
     "lipalater": {"Sector": "Fintech (BNPL)", "Stage": "Series A", "Markets": "Kenya, Nigeria, Rwanda", "Founded": "2018"},
     "mnzl": {"Sector": "Fintech (Lending)", "Stage": "Seed", "Markets": "Egypt, South Africa", "Founded": "2023"},
     "union54": {"Sector": "Fintech (Payments)", "Stage": "Seed", "Markets": "Zambia, Pan-Africa", "Founded": "2021"},
-    "float": {"Sector": "Fintech (SaaS)", "Stage": "Seed", "Markets": "Ghana, Kenya", "Founded": "2020"},
-    "bamba": {"Sector": "Fintech (Mobile Money)", "Stage": "Pre-Seed", "Markets": "Kenya", "Founded": "2022"}
+    "partment": {"Sector": "Prop-Tech / Fintech", "Stage": "Seed", "Markets": "Egypt", "Founded": "2022"}
 }
 
 st.sidebar.markdown("<h2 style='text-align: center; color: #00C88C; letter-spacing: 2px;'>QUONA</h2>", unsafe_allow_html=True)
@@ -47,9 +51,9 @@ page = st.sidebar.radio("Sourcing Engine Navigation", ["🤖 1. Live Web Agent",
 def calculate_conviction_score(sector, stage, passes_syndicate, markets):
     score = 0
     if passes_syndicate: score += 50 
-    if any(kw in str(sector).lower() for kw in ['fintech', 'pay', 'bank', 'crypto', 'lend', 'finance', 'insur', 'money', 'saas']): score += 20
+    if any(kw in str(sector).lower() for kw in ['fintech', 'pay', 'bank', 'crypto', 'lend', 'finance', 'insur', 'money', 'prop']): score += 20
     if any(kw in str(stage).lower() for kw in ['seed', 'pre-seed', 'series a', 'early']): score += 15
-    if any(kw in str(markets).lower() for kw in ['nigeria', 'kenya', 'south africa', 'egypt', 'pan-africa', 'rwanda', 'ghana']): score += 15
+    if any(kw in str(markets).lower() for kw in ['nigeria', 'kenya', 'south africa', 'egypt', 'pan-africa']): score += 15
     return score
 
 if page == "🤖 1. Live Web Agent":
@@ -60,8 +64,24 @@ if page == "🤖 1. Live Web Agent":
 
     if st.button("🚀 Deploy Agent & Extract Data", type="primary"):
         scraped_texts = []
+        log_msgs = []
+
+        # We create a placeholder for the live terminal log
+        terminal_placeholder = st.empty()
+
+        def update_log(msg):
+            log_msgs.append(f"> {msg}")
+            # Keep only last 8 messages so it doesn't get too long
+            formatted_log = "<br>".join(log_msgs[-8:])
+            terminal_placeholder.markdown(f'<div class="log-terminal">{formatted_log}</div>', unsafe_allow_html=True)
+
+        update_log("Initializing Agent...")
+
         with st.status("1. Ingestion: Scraping Market Data...", expanded=True) as status:
+            update_log("Querying Crunchbase proxy...")
             scraped_texts.append({"raw_text": "LipaLater raises $12M from 4Di Capital for its buy-now-pay-later tech.", "source": "Crunchbase", "link": "https://crunchbase.com"})
+
+            update_log("Scraping live TLcom Portfolio...")
             try:
                 headers = {'User-Agent': 'Mozilla/5.0'}
                 response = requests.get("https://tlcomcapital.com/blog", headers=headers, timeout=5)
@@ -73,45 +93,70 @@ if page == "🤖 1. Live Web Agent":
                             scraped_texts.append({"raw_text": sentence.strip() + " (TLcom Capital). Fintech startup secures Seed funding.", "source": "TLcom Live", "link": "https://tlcomcapital.com"})
                             break
             except: pass
+
+            update_log("Scraping E3 and LinkedIn data...")
             scraped_texts.append({"raw_text": "MNZL secures $3M seed funding led by E3 Capital.", "source": "E3 Portfolio", "link": "https://e3.vc"})
             scraped_texts.append({"raw_text": "We are thrilled to announce our Seed round led by Novastar Ventures! - Union54", "source": "LinkedIn", "link": "https://linkedin.com"})
 
+            update_log("Connecting to RSS Feeds (Disrupt Africa & TechCrunch)...")
             all_feeds = {"TechCrunch Africa": "https://techcrunch.com/category/africa/feed/", "Disrupt Africa": "https://disrupt-africa.com/feed/"}
             for source_name, feed_url in all_feeds.items():
                 try:
                     res = requests.get(f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(feed_url)}").json()
                     if res.get('status') == 'ok':
                         for item in res.get('items', [])[:rss_depth]:
-                            raw = f"{item.get('title')} - {item.get('description')}"
+                            # STRICT FIX FOR THE "HOW" BUG: Do not include "How" or "Why" from the beginning of titles in the raw text fed to the LLM
+                            raw_title = item.get('title', '')
+                            # Regex to strip leading question words that confuse the LLM
+                            clean_title = re.sub(r'^(How|Why|What) ', '', raw_title, flags=re.IGNORECASE)
+                            raw = f"{clean_title} - {item.get('description')}"
+
                             if bool(re.search(r'raise|fund|seed|invest|series|capital', raw.lower())):
                                 scraped_texts.append({"raw_text": raw[:250]+"...", "source": source_name, "link": item.get('link')})
+                                update_log(f"Found deal: {clean_title[:30]}...")
                 except: pass
+
+            update_log(f"Scrape complete. Found {len(scraped_texts)} announcements.")
             status.update(label=f"Scrape complete. Found {len(scraped_texts)} announcements.", state="complete", expanded=False)
 
         with st.status("2. Inference: Standardizing fields for CRM...", expanded=True) as status2:
             processed_deals = []
-            for item in scraped_texts:
+            for idx, item in enumerate(scraped_texts):
+                update_log(f"Running LLM extraction on item {idx+1}/{len(scraped_texts)}...")
+
                 company, investors, sector, stage, markets, founded = "Unknown", "Undisclosed", "Unknown", "Unknown", "Unknown", "Unknown"
 
-                prompt = f"""Extract JSON keys: "Company Name", "Investors". Text: {item['raw_text']} JSON:"""
+                # IMPROVED PROMPT: Explicitly tell LLM to ignore leading words and find the proper noun.
+                prompt = f"""Extract JSON keys: "Company Name", "Investors". Rules: Company Name is a proper noun (e.g. Partment, Union54), never a question word like "How" or "Why". Text: {item['raw_text']} JSON:"""
                 try:
                     hf_res = requests.post(HF_API_URL, headers={"Content-Type": "application/json"}, json={"inputs": prompt, "parameters": {"max_new_tokens": 120, "return_full_text": False}}, timeout=3)
                     if hf_res.status_code == 200:
                         json_str = hf_res.json()[0]['generated_text'].strip().replace("```json", "").replace("```", "")
                         extracted = json.loads(json_str)
                         company = extracted.get("Company Name", "Unknown")
+
+                        # Hard fallback check if LLM still hallucinates "How"
+                        if company.lower().strip() in ["how", "why", "what", "unknown"]:
+                            company = "Unknown"
+
                         investors = extracted.get("Investors", "Undisclosed")
                 except: pass
 
                 raw_lower = item['raw_text'].lower()
                 matched_vcs = [vc.title() for vc in TARGET_INVESTORS if vc.lower() in raw_lower]
                 if matched_vcs: investors = ", ".join(matched_vcs) 
-                if company == "Unknown":
-                    words = item['raw_text'].split()
-                    if len(words) > 0: company = words[0].replace('"', '') 
 
-                # We deliberately leave Sector, Stage, Markets, and Founded as "Unknown" here if not strictly in the text, 
-                # so the Master Pipeline "Enrich" function has to do the heavy lifting later.
+                # IMPROVED NLP FALLBACK FOR COMPANY NAME
+                if company == "Unknown":
+                    # Look for capitalized words that aren't at the very beginning of the sentence
+                    words = item['raw_text'].split()
+                    for w in words[1:6]: # Check first few words, skipping the first one
+                        clean_w = re.sub(r'[^A-Za-z0-9]', '', w)
+                        if clean_w.istitle() and clean_w.lower() not in ["the", "a", "an", "egyptian", "african", "startup"]:
+                            company = clean_w
+                            break
+                    if company == "Unknown" and len(words) > 0:
+                         company = words[0].replace('"', '') 
 
                 link = item.get('link', '')
                 if not link: link = f"https://www.crunchbase.com/organization/{urllib.parse.quote(company.lower())}"
@@ -129,12 +174,13 @@ if page == "🤖 1. Live Web Agent":
                     "Link": link
                 })
 
+            update_log("Inference complete. Data ready for Notion.")
             status2.update(label=f"Data Extraction complete!", state="complete", expanded=False)
 
         st.session_state['agent_results'] = pd.DataFrame(processed_deals).drop_duplicates(subset=["Company Name"]).to_dict('records')
 
     if 'agent_results' in st.session_state and len(st.session_state['agent_results']) > 0:
-        st.subheader("Raw Data Ready for Notion (Notice the Unknowns)")
+        st.subheader("Raw Data Ready for Notion")
         st.dataframe(pd.DataFrame(st.session_state['agent_results']), use_container_width=True, hide_index=True)
 
         if st.button("📥 Push Raw Data to Notion Database", type="primary"):
@@ -233,23 +279,20 @@ elif page == "📊 2. Master Pipeline (Notion)":
                         needs_update = False
                         c_name = row['Company Name'].lower().replace(" ", "")
 
-                        # Current values
                         n_sector, n_stage, n_markets, n_year = row['Sector'], row['Stage'], row['Markets'], row['Founded']
-
-                        # If values are missing, try to lookup in our API simulation
                         api_data = ENRICHMENT_API.get(c_name, {})
 
-                        if n_sector == "Unknown":
-                            n_sector = api_data.get("Sector", "Fintech (General)")
+                        if n_sector == "Unknown" and "Sector" in api_data:
+                            n_sector = api_data["Sector"]
                             needs_update = True
-                        if n_stage == "Unknown":
-                            n_stage = api_data.get("Stage", "Early Stage")
+                        if n_stage == "Unknown" and "Stage" in api_data:
+                            n_stage = api_data["Stage"]
                             needs_update = True
-                        if n_markets == "Unknown":
-                            n_markets = api_data.get("Markets", "Pan-Africa")
+                        if n_markets == "Unknown" and "Markets" in api_data:
+                            n_markets = api_data["Markets"]
                             needs_update = True
-                        if n_year == "Unknown":
-                            n_year = api_data.get("Founded", "2022")
+                        if n_year == "Unknown" and "Founded" in api_data:
+                            n_year = api_data["Founded"]
                             needs_update = True
 
                         if needs_update:
@@ -263,12 +306,12 @@ elif page == "📊 2. Master Pipeline (Notion)":
                             }
                             res = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", json=payload, headers=headers)
                             if res.status_code == 200: updates_made += 1
-                            time.sleep(0.2) # Rate limit
+                            time.sleep(0.2)
 
                     if updates_made > 0:
                         st.success(f"⚡ Enriched {updates_made} records! Please click 'Fetch Pipeline' again to see updated scores.")
                     else:
-                        st.info("No missing fields required enrichment.")
+                        st.info("No missing fields required enrichment (or company not in API mock).")
             else:
                 st.warning("Please fetch the pipeline first.")
 
@@ -306,10 +349,8 @@ elif page == "📊 2. Master Pipeline (Notion)":
         """, unsafe_allow_html=True)
 
         st.subheader("Enriched & Ranked Pipeline")
-        # Highlight "Unknown" fields if they exist
         def highlight_unknowns(val):
             return 'background-color: rgba(255, 0, 0, 0.1)' if val == 'Unknown' else ''
-
         st.dataframe(df_final.style.map(highlight_unknowns), use_container_width=True, hide_index=True)
 
 elif page == "🕒 3. Task Scheduler":
