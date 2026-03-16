@@ -1,358 +1,186 @@
 import streamlit as st
 import pandas as pd
 import requests
-import urllib.parse
-from bs4 import BeautifulSoup
-import re
-import time
 import json
-import datetime
+import os
 
-st.set_page_config(page_title="Quona Sourcing Agent", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="AI Sourcing Agent", page_icon="🌍", layout="wide")
 
-# --- UI / STYLING ---
-st.markdown("""
-    <style>
-    html, body, [class*="css"] { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; }
-    div.stButton > button:first-child {
-        background-color: #00C88C !important; color: white !important;
-        border: none !important; border-radius: 6px !important; font-weight: 600 !important;
+st.title("🌍 Automated VC Sourcing Agent")
+st.markdown("**(Web App → LLM Evaluation → User Approval → Notion DB)**")
+
+# --- 1. CREDENTIALS & CONFIG ---
+# Fetch API keys directly from environment variables first, so the user NEVER has to type them if hosted.
+ENV_OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "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")
+ENV_NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "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")
+
+with st.sidebar:
+    st.header("🔑 App Configuration")
+
+    # Check if we successfully grabbed the key from the environment/server
+    if ENV_OPENAI_KEY:
+        st.success("✅ OpenAI API Key loaded securely from server environment.")
+        OPENAI_API_KEY = ENV_OPENAI_KEY
+    else:
+        # Fallback to manual entry only if the env var isn't set (e.g. running locally for the first time)
+        st.warning("⚠️ No OpenAI API key found in server secrets.")
+        OPENAI_API_KEY = st.text_input("OpenAI API Key (Required for LLM extraction)", type="password")
+
+    NOTION_TOKEN = st.text_input("Notion Integration Token", type="password", value=ENV_NOTION_TOKEN)
+    DATABASE_ID = st.text_input("Notion Database ID", value="1dfab0f891624805b48c07a932725b29")
+
+    st.divider()
+
+    st.header("🎯 Thesis / Criteria Tweaking")
+    target_geos = st.text_input("Target Geographies", "Nigeria, Kenya, Egypt, South Africa, Pan-Africa")
+    target_sectors = st.text_input("Target Sectors", "Financial Infrastructure, B2B Embedded Finance, Payments")
+    tier_1_vcs = st.text_area("Tier 1 VCs (Syndicate Signal)", "Partech, TLcom, QED, YC, Target Global, Quona, Novastar, 4Di")
+
+# --- 2. FRONTEND INPUT ---
+st.subheader("1. Input Sourcing Data")
+raw_data = st.text_area("Paste news articles, press releases, or a list of startups here:", height=150, 
+                        placeholder="e.g. 'Stitch raises $55M led by Target Global...'")
+
+# --- 3. STRICT LLM EXTRACTION ---
+def extract_with_llm(text, geos, sectors, vcs, api_key):
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
     }
-    div.stButton > button:first-child:hover { background-color: #00A4FF !important; }
-    [data-testid="stStatusWidget"] { border-left: 4px solid #00C88C !important; border-radius: 4px !important; }
-    .deep-dive-card {
-        background: linear-gradient(135deg, rgba(0, 200, 140, 0.1) 0%, rgba(0, 164, 255, 0.1) 100%);
-        border-left: 6px solid #00C88C; padding: 20px; border-radius: 8px; margin-bottom: 20px;
-    }
-    .framework-box {
-        background-color: #1a1c23; padding: 15px; border-radius: 6px; margin-top: 10px; border: 1px solid #333;
-    }
-    .log-terminal {
-        background-color: #1E1E1E; color: #00FF00; font-family: 'Courier New', Courier, monospace;
-        padding: 10px; border-radius: 5px; height: 150px; overflow-y: scroll; font-size: 12px;
-        margin-bottom: 15px; border: 1px solid #333;
-    }
-    </style>
-""", unsafe_allow_html=True)
 
-# --- CREDENTIALS & CONSTANTS ---
-NOTION_TOKEN = "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"
-DATABASE_ID = "1dfab0f891624805b48c07a932725b29"
-HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B-Instruct-v0.1"
+    prompt = f"""
+    You are a VC Sourcing AI. Extract all startups mentioned in the text. 
+    Evaluate them against these criteria:
+    - Target Geos: {geos}
+    - Target Sectors: {sectors}
+    - Target VCs: {vcs}
 
-TARGET_INVESTORS = ["partech", "tlcom", "4di", "helios", "qed", "novastar", "e3", "briter", "y combinator", "target global", "founders factory"]
+    You MUST output valid JSON with a single key `companies` containing a list of objects.
+    Each object must have exactly these keys:
+    "Company Name" (string), "HQ Country" (string), "Markets Served" (string), "Founded Year" (number or null),
+    "Seed Date" (string), "Seed Amount ($m)" (number or null), "Investors" (string), "Sector" (string),
+    "Stage" (string), "Traction Proxy" (string), "Crunchbase / Link" (string),
+    "Passes Sector?" (Yes/No), "Passes Geography?" (Yes/No), "Passes Stage?" (Yes/No), "Passes Syndicate?" (Yes/No),
+    "Market Score" (number 1-10), "Traction Score" (number 1-10), "Founder Score" (number 1-10), "Position Score" (number 1-10), "Quona Score" (number 1-10).
 
-ENRICHMENT_API = {
-    "lipalater": {"Sector": "Lending", "Stage": "Series A", "Markets": "Kenya, Nigeria, Rwanda", "Founded": "2018"},
-    "mnzl": {"Sector": "Lending", "Stage": "Seed", "Markets": "Egypt, South Africa", "Founded": "2023"},
-    "union54": {"Sector": "Payments", "Stage": "Seed", "Markets": "Zambia, Pan-Africa", "Founded": "2021"},
-    "partment": {"Sector": "Prop-Tech / Fintech", "Stage": "Seed", "Markets": "Egypt", "Founded": "2022"},
-    "yodawy": {"Sector": "Health-Tech / Fintech", "Stage": "Series B", "Markets": "Egypt", "Founded": "2018"},
-    "float": {"Sector": "Embedded Finance", "Stage": "Seed", "Markets": "Ghana, Kenya", "Founded": "2020"},
-    "bamba": {"Sector": "Payments", "Stage": "Pre-Seed", "Markets": "Kenya", "Founded": "2022"},
-    "djamo": {"Sector": "Payments", "Stage": "Series A", "Markets": "Ivory Coast, Francophone Africa", "Founded": "2019"},
-    "connectmoney": {"Sector": "Payments", "Stage": "Seed", "Markets": "Egypt, Morocco", "Founded": "2021"},
-    "shopokoa": {"Sector": "Lending", "Stage": "Seed", "Markets": "Kenya", "Founded": "2022"},
-    "yoco": {"Sector": "Payments", "Stage": "Series C", "Markets": "South Africa", "Founded": "2015"},
-    "elevate": {"Sector": "Payments", "Stage": "Pre-Seed", "Markets": "Egypt, GCC", "Founded": "2022"},
-    "kuda": {"Sector": "Financial Infrastructure", "Stage": "Series B", "Markets": "Nigeria, UK", "Founded": "2019"},
-    "sava": {"Sector": "Financial Infrastructure", "Stage": "Seed", "Markets": "South Africa, Kenya", "Founded": "2022"},
-    "bigdotai": {"Sector": "Financial Infrastructure", "Stage": "Pre-Seed", "Markets": "Pan-Africa", "Founded": "2023"}
-}
-
-# --- SIDEBAR NAV ---
-st.sidebar.markdown("<h2 style='text-align: center; color: #00C88C; letter-spacing: 2px;'>QUONA</h2>", unsafe_allow_html=True)
-st.sidebar.markdown("<p style='text-align: center; font-size: 0.9em; margin-top: -15px;'>Sourcing Engine Framework</p>", unsafe_allow_html=True)
-st.sidebar.divider()
-page = st.sidebar.radio("Navigation", ["🤖 1. Live Web Agent", "📊 2. Master Pipeline (Notion)", "🕒 3. Task Scheduler"])
-
-# ==========================================
-# REVISED CORE ALGORITHM (CASE STUDY FRAMEWORK)
-# ==========================================
-def calculate_conviction_score(sector, stage, passes_syndicate, markets, traction_data):
+    Text: {text}
     """
-    Evaluates deals purely on the 4 requested pillars:
-    1. Market Opportunity (25%)
-    2. Early Traction (25%)
-    3. Founder Strength (25%)
-    4. Competitive Positioning (25%)
-    """
-    breakdown = {}
 
-    # 1. Market Opportunity (Weight: 25 points)
-    # Measured by Geographic TAM. Big 4 African markets yield the highest scale potential.
-    m_lower = str(markets).lower()
-    if any(kw in m_lower for kw in ['nigeria', 'egypt', 'south africa', 'kenya', 'pan-africa']):
-        breakdown["Market Opportunity"] = 25
-    elif m_lower not in ["unknown", "", "none"]:
-        breakdown["Market Opportunity"] = 15
+    payload = {
+        "model": "gpt-4o-mini",
+        "response_format": { "type": "json_object" },
+        "messages": [
+            {"role": "system", "content": "You are a strict JSON data extractor."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code != 200:
+        raise Exception(f"API Error {response.status_code}: {response.text}")
+
+    response_data = response.json()
+    content = response_data['choices'][0]['message']['content']
+    return json.loads(content)
+
+if st.button("🤖 Analyze & Score Deals", type="primary"):
+    if not OPENAI_API_KEY:
+        st.error("❌ Cannot run: Missing OpenAI API Key. Please provide it in the sidebar or set the OPENAI_API_KEY environment variable.")
+    elif not raw_data.strip():
+        st.warning("Please paste some data to analyze.")
     else:
-        breakdown["Market Opportunity"] = 5
+        with st.spinner("LLM is extracting and scoring deals..."):
+            try:
+                result = extract_with_llm(raw_data, target_geos, target_sectors, tier_1_vcs, OPENAI_API_KEY)
+                if "companies" in result and result["companies"]:
+                    st.session_state['llm_results'] = pd.DataFrame(result["companies"])
+                    st.session_state['llm_results'].insert(0, "Approve for CRM", True)
+                else:
+                    st.info("No companies found in the text.")
+            except Exception as e:
+                st.error(f"Error calling LLM: {e}")
 
-    # 2. Early Traction (Weight: 25 points)
-    # Measured by Stage maturity OR explicitly scraped traction numbers (merchants, volume)
-    st_lower = str(stage).lower()
-    tr_lower = str(traction_data).lower()
-    if any(kw in st_lower for kw in ['series b', 'series c', 'growth']):
-        breakdown["Early Traction"] = 25
-    elif any(kw in st_lower for kw in ['series a']) or any(kw in tr_lower for kw in ['merchants', 'processed', 'partners', 'revenue']):
-        breakdown["Early Traction"] = 20
-    elif 'seed' in st_lower:
-        breakdown["Early Traction"] = 15
-    elif 'pre-seed' in st_lower:
-        breakdown["Early Traction"] = 10
-    else:
-        breakdown["Early Traction"] = 5
+# --- 4. USER APPROVAL (DATA EDITOR) ---
+if 'llm_results' in st.session_state:
+    st.subheader("2. Review & Edit (Human-in-the-Loop)")
+    st.markdown("Edit any fields below. Uncheck the box to drop a deal.")
 
-    # 3. Founder Strength (Weight: 25 points)
-    # Proxied via Target VC Validation. Top Tier VCs conduct intense founder DD.
-    if passes_syndicate:
-        breakdown["Founder Strength"] = 25
-    else:
-        breakdown["Founder Strength"] = 5
+    edited_df = st.data_editor(st.session_state['llm_results'], use_container_width=True, hide_index=True)
 
-    # 4. Competitive Positioning (Weight: 25 points)
-    # Measured by sector moats. B2B / Infrastructure has higher switching costs than Consumer apps.
-    sec_lower = str(sector).lower()
-    if any(kw in sec_lower for kw in ['infrastructure', 'embedded', 'b2b', 'saas']):
-        breakdown["Competitive Positioning"] = 25
-    elif any(kw in sec_lower for kw in ['payments', 'lending', 'prop', 'health']):
-        breakdown["Competitive Positioning"] = 15
-    else:
-        breakdown["Competitive Positioning"] = 10
+    # --- 5. CHECK DB & PUSH TO NOTION ---
+    if st.button("📤 Sync Approved Deals to Notion"):
+        approved_deals = edited_df[edited_df["Approve for CRM"] == True].drop(columns=["Approve for CRM"])
 
-    return sum(breakdown.values()), breakdown
+        headers = {
+            "Authorization": f"Bearer {NOTION_TOKEN}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json"
+        }
 
-# ==========================================
-# PAGE 1: LIVE WEB AGENT
-# ==========================================
-if page == "🤖 1. Live Web Agent":
-    st.title("Autonomous Data Ingestion")
-    st.markdown("Scrapes market data, extracts entities with strict NLP, and pushes raw records to Notion.")
+        with st.spinner("Checking Notion for duplicates..."):
+            query_url = f"https://api.notion.com/v1/databases/{DATABASE_ID}/query"
+            existing_res = requests.post(query_url, headers=headers).json().get("results", [])
+            existing_names = [
+                r.get("properties", {}).get("Company Name", {}).get("title", [{}])[0].get("plain_text", "").lower() 
+                for r in existing_res if r.get("properties", {}).get("Company Name", {}).get("title")
+            ]
 
-    rss_depth = st.slider("RSS Feed Depth", min_value=5, max_value=30, value=15)
+            pushed_count = 0
+            skipped_count = 0
+            post_url = "https://api.notion.com/v1/pages"
 
-    if st.button("🚀 Deploy Agent & Extract Data", type="primary"):
-        scraped_texts = []
-        log_msgs = []
-        terminal_placeholder = st.empty()
+            for _, row in approved_deals.iterrows():
+                c_name = str(row.get("Company Name", "")).strip()
+                if not c_name: continue
 
-        def update_log(msg):
-            log_msgs.append(f"> {msg}")
-            terminal_placeholder.markdown(f'<div class="log-terminal">{"<br>".join(log_msgs[-8:])}</div>', unsafe_allow_html=True)
+                if c_name.lower() in existing_names:
+                    skipped_count += 1
+                    continue
 
-        update_log("Initializing Agent...")
+                payload = {
+                    "parent": {"database_id": DATABASE_ID},
+                    "properties": {
+                        "Company Name": {"title": [{"text": {"content": c_name}}]},
+                        "HQ Country": {"rich_text": [{"text": {"content": str(row.get("HQ Country", ""))}}]},
+                        "Investors": {"rich_text": [{"text": {"content": str(row.get("Investors", ""))}}]},
+                        "Sector": {"rich_text": [{"text": {"content": str(row.get("Sector", ""))}}]},
+                        "Traction Proxy": {"rich_text": [{"text": {"content": str(row.get("Traction Proxy", ""))}}]},
+                        "Crunchbase / Link": {"url": str(row.get("Crunchbase / Link", "")) if row.get("Crunchbase / Link") else None}
+                    }
+                }
 
-        with st.status("1. Ingestion: Scraping Market Data...", expanded=True) as status:
-            update_log("Querying Crunchbase proxy...")
-            scraped_texts.append({"raw_text": "LipaLater raises $12M from 4Di Capital for its buy-now-pay-later tech.", "source": "Crunchbase", "link": "https://crunchbase.com"})
+                def add_number(prop_name, df_col):
+                    val = row.get(df_col)
+                    if pd.notnull(val) and str(val).strip() != "":
+                        try: payload["properties"][prop_name] = {"number": float(val)}
+                        except ValueError: pass
 
-            update_log("Connecting to RSS Feeds...")
-            all_feeds = {"TechCrunch Africa": "https://techcrunch.com/category/africa/feed/", "Disrupt Africa": "https://disrupt-africa.com/feed/"}
-            for source_name, feed_url in all_feeds.items():
-                try:
-                    res = requests.get(f"https://api.rss2json.com/v1/api.json?rss_url={urllib.parse.quote(feed_url)}").json()
-                    if res.get('status') == 'ok':
-                        for item in res.get('items', [])[:rss_depth]:
-                            raw_title = item.get('title', '')
-                            clean_title = re.sub(r'^(How|Why|What|Should|Which|Announcing) ', '', raw_title, flags=re.IGNORECASE)
-                            raw = f"{clean_title} - {item.get('description')}"
-                            if bool(re.search(r'raise|fund|seed|invest|series|capital', raw.lower())):
-                                scraped_texts.append({"raw_text": raw[:250]+"...", "source": source_name, "link": item.get('link')})
-                                update_log(f"Scraped: {clean_title[:30]}...")
-                except: pass
+                add_number("Founded Year", "Founded Year")
+                add_number("Seed Amount ($m)", "Seed Amount ($m)")
 
-            status.update(label=f"Scrape complete. Found {len(scraped_texts)} announcements.", state="complete", expanded=False)
+                if "Market Score (1-10)" in row: add_number("Market Score (1-10)", "Market Score (1-10)")
+                elif "Market Score" in row: add_number("Market Score (1-10)", "Market Score")
 
-        with st.status("2. Inference: Extracting Entities with Strict NLP...", expanded=True) as status2:
-            processed_deals = []
-            for idx, item in enumerate(scraped_texts):
-                raw_text = item['raw_text']
-                company, investors, sector, stage, markets, founded = "Unknown", "Undisclosed", "Unknown", "Unknown", "Unknown", "Unknown"
+                if "Traction Score (1-10)" in row: add_number("Traction Score (1-10)", "Traction Score (1-10)")
+                elif "Traction Score" in row: add_number("Traction Score (1-10)", "Traction Score")
 
-                # Simple heuristic extraction fallback for demo speeds
-                words = raw_text.split()
-                for w in words:
-                    clean_w = re.sub(r'[^A-Za-z0-9]', '', w)
-                    if clean_w.istitle() and not re.search(r'^\d', clean_w) and clean_w.lower() not in ["we", "how", "the", "startup"]:
-                        company = clean_w
-                        break
+                if "Founder Score (1-10)" in row: add_number("Founder Score (1-10)", "Founder Score (1-10)")
+                elif "Founder Score" in row: add_number("Founder Score (1-10)", "Founder Score")
 
-                raw_lower = raw_text.lower()
-                matched_vcs = [vc.title() for vc in TARGET_INVESTORS if vc.lower() in raw_lower]
-                if matched_vcs: investors = ", ".join(matched_vcs) 
+                if "Position Score (1-10)" in row: add_number("Position Score (1-10)", "Position Score (1-10)")
+                elif "Position Score" in row: add_number("Position Score (1-10)", "Position Score")
 
-                passes_syndicate = any(target.lower() in investors.lower() for target in TARGET_INVESTORS)
+                add_number("Quona Score", "Quona Score")
 
-                processed_deals.append({
-                    "Company Name": company,
-                    "Sector": sector,
-                    "Stage": stage,
-                    "Markets Served": markets,
-                    "Founded Year": str(founded),
-                    "Investors": investors,
-                    "Passes Syndicate": passes_syndicate,
-                    "Primary Source": item['source'],
-                    "Link": item.get('link', '')
-                })
-            status2.update(label=f"Data Extraction complete!", state="complete", expanded=False)
+                res = requests.post(post_url, json=payload, headers=headers)
+                if res.status_code == 200:
+                    pushed_count += 1
+                else:
+                    st.error(f"Failed to push {c_name}: {res.text}")
 
-        st.session_state['agent_results'] = pd.DataFrame(processed_deals).drop_duplicates(subset=["Company Name"]).to_dict('records')
-
-    if 'agent_results' in st.session_state and len(st.session_state['agent_results']) > 0:
-        st.subheader("Raw Data Ready for Notion (Awaiting Enrichment)")
-        st.dataframe(pd.DataFrame(st.session_state['agent_results']), use_container_width=True, hide_index=True)
-
-
-# ==========================================
-# PAGE 2: MASTER PIPELINE & ENRICHMENT
-# ==========================================
-elif page == "📊 2. Master Pipeline (Notion)":
-    st.title("Africa Fintech Master Pipeline")
-    st.markdown("Pulls raw data, **enriches missing fields** via Data APIs, and evaluates deals using the explicitly defined **4-Pillar Quona Framework**.")
-
-    col1, col2, col3 = st.columns([1.2, 1.2, 1])
-
-    with col1:
-        if st.button("🔄 1. Fetch Pipeline from CRM", type="primary"):
-            with st.spinner("Fetching data from Notion..."):
-                headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
-                response = requests.post(f"https://api.notion.com/v1/databases/{DATABASE_ID}/query", headers=headers)
-
-                if response.status_code == 200:
-                    results = response.json().get("results", [])
-                    notion_data = []
-
-                    for i in results:
-                        props = i.get("properties", {})
-                        page_id = i.get("id")
-                        name = props.get("Company Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Company Name", {}).get("title") else ""
-                        if not name: continue
-
-                        def extract_val(prop_dict):
-                            if not prop_dict: return "Unknown"
-                            ptype = prop_dict.get("type", "")
-                            if ptype == "rich_text": return prop_dict["rich_text"][0].get("plain_text", "Unknown") if prop_dict.get("rich_text") else "Unknown"
-                            if ptype == "select": return prop_dict["select"].get("name", "Unknown") if prop_dict.get("select") else "Unknown"
-                            if ptype == "multi_select": return ", ".join([x.get("name") for x in prop_dict.get("multi_select", [])]) if prop_dict.get("multi_select") else "Unknown"
-                            if ptype == "number": return str(prop_dict["number"]) if prop_dict.get("number") is not None else "Unknown"
-                            return "Unknown"
-
-                        markets = extract_val(props.get("Markets Served"))
-                        year = extract_val(props.get("Founded Year"))
-
-                        passes_synd = props.get("Passes Syndicate?", {}).get("checkbox", False)
-                        if "Passes Syndicate" in props and "Passes Syndicate?" not in props:
-                            passes_synd = props.get("Passes Syndicate", {}).get("checkbox", False)
-
-                        sector = extract_val(props.get("Sector"))
-                        stage = extract_val(props.get("Stage"))
-                        investors = extract_val(props.get("Investors")) # Contains our traction proxies like "20k partners"
-
-                        # Use the NEW framework scoring function!
-                        score, breakdown = calculate_conviction_score(sector, stage, passes_synd, markets, investors)
-
-                        notion_data.append({
-                            "id": page_id,
-                            "Company Name": name, 
-                            "Score": score,
-                            "Sector": sector,
-                            "Stage": stage,
-                            "Markets": markets,
-                            "Founded": year,
-                            "Investors": investors,
-                            "Target VCs?": "✅" if passes_synd else "❌",
-                            "framework_breakdown": breakdown
-                        })
-
-                    if notion_data:
-                        st.session_state['scored_pipeline'] = pd.DataFrame(notion_data)
-                    else:
-                        st.info("Database is empty.")
-
-    with col2:
-        if st.button("🔍 2. Enrich Missing Data via API"):
-            if 'scored_pipeline' in st.session_state:
-                with st.spinner("Querying APIs..."):
-                    headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
-                    updates_made = 0
-                    for index, row in st.session_state['scored_pipeline'].iterrows():
-                        needs_update = False
-                        c_name = re.sub(r'[^a-z0-9]', '', str(row['Company Name']).lower())
-                        n_sector, n_stage, n_markets, n_year = str(row['Sector']).strip(), str(row['Stage']).strip(), str(row['Markets']).strip(), str(row['Founded']).strip()
-                        api_data = ENRICHMENT_API.get(c_name, None)
-
-                        if api_data:
-                            if (n_sector.lower() in ["unknown", "", "other"]) and "Sector" in api_data:
-                                n_sector = api_data["Sector"]; needs_update = True
-                            if (n_stage.lower() in ["unknown", "", "other"]) and "Stage" in api_data:
-                                n_stage = api_data["Stage"]; needs_update = True
-                            if (n_markets.lower() in ["unknown", "", "other"]) and "Markets" in api_data:
-                                n_markets = api_data["Markets"]; needs_update = True
-                            if (n_year.lower() in ["unknown", "", "other"]) and "Founded" in api_data:
-                                n_year = api_data["Founded"]; needs_update = True
-
-                        if needs_update:
-                            payload = {"properties": {"Markets Served": {"rich_text": [{"text": {"content": n_markets}}]}}}
-                            try: payload["properties"]["Sector"] = {"select": {"name": n_sector}}
-                            except: pass
-                            try: payload["properties"]["Stage"] = {"select": {"name": n_stage}}
-                            except: pass
-                            try: payload["properties"]["Founded Year"] = {"number": int(n_year)}
-                            except ValueError: pass 
-                            requests.patch(f"https://api.notion.com/v1/pages/{row['id']}", json=payload, headers=headers)
-                            updates_made += 1
-                            time.sleep(0.2)
-                    if updates_made > 0: st.success(f"⚡ Enriched {updates_made} records! Please click 'Fetch Pipeline' again to see updated scores.")
-                    else: st.info("No missing fields required enrichment.")
-            else:
-                st.warning("Please fetch the pipeline first.")
-
-    with col3:
-        if st.button("🧹 3. Clean DB"):
-            with st.spinner("Optimizing DB..."):
-                st.success("🧹 Removed 0 duplicates.")
-
-    if 'scored_pipeline' in st.session_state:
-        df_final = st.session_state['scored_pipeline'].drop(columns=['id'])
-        df_final = df_final.sort_values(by=['Score', 'Company Name'], ascending=[False, True])
-        st.divider()
-
-        # --- EXPLICIT FRAMEWORK DISPLAY ---
-        top_deal = df_final.iloc[0]
-        bd = top_deal['framework_breakdown']
-
-        st.markdown(f"""
-        <div class="deep-dive-card">
-            <h3 style="margin-top: 0;">🏆 Top Deep Dive Recommendation: <strong>{top_deal['Company Name']}</strong> (Score: {top_deal['Score']}/100)</h3>
-            <p style="font-size: 1.1em;">In accordance with the required investment framework, deals are evaluated against 4 explicit criteria, weighted equally at 25% each:</p>
-            <div class="framework-box">
-                <b>🌍 1. Market Opportunity (25%) — Score: {bd.get('Market Opportunity', 0)}/25</b><br>
-                <i>Rationale: Big 4 markets (Nigeria, Kenya, Egypt, SA) offer the highest TAM and scale potential.</i><br><br>
-                <b>📈 2. Early Traction (25%) — Score: {bd.get('Early Traction', 0)}/25</b><br>
-                <i>Rationale: Proxied by stage maturity (Series A+) or hard metrics extracted from news (e.g., users, merchants).</i><br><br>
-                <b>🧠 3. Founder Strength (25%) — Score: {bd.get('Founder Strength', 0)}/25</b><br>
-                <i>Rationale: Verified via Syndicate Signaling. Backing from Tier-1 target VCs proxies intense founder due-diligence.</i><br><br>
-                <b>🏰 4. Competitive Positioning (25%) — Score: {bd.get('Competitive Positioning', 0)}/25</b><br>
-                <i>Rationale: Measured by sector defensibility. Financial infrastructure and B2B embedded finance possess stronger moats/switching costs than consumer lending.</i>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.subheader("Enriched & Ranked Pipeline")
-        def highlight_unknowns(val):
-            val_str = str(val).strip().lower()
-            if val_str in ['unknown', '', 'other', 'none']: return 'background-color: rgba(255, 0, 0, 0.1)'
-            return ''
-        st.dataframe(df_final.drop(columns=['framework_breakdown']).style.map(highlight_unknowns), use_container_width=True, hide_index=True)
-
-# ==========================================
-# PAGE 3: TASK SCHEDULER
-# ==========================================
-elif page == "🕒 3. Task Scheduler":
-    st.title("🕒 Dev-Ops & Task Scheduler")
-    st.markdown("This control center monitors the headless background worker deployed via **GitHub Actions**.")
-    col1, col2, col3 = st.columns(3)
-    with col1: st.metric(label="System Status", value="Active 🟢")
-    with col2: st.metric(label="Current CRON Expression", value="0 0 1 1,4,7,10 *")
-    with col3: st.metric(label="Next Automated Run", value="April 1, 2026")
+            if pushed_count > 0:
+                st.success(f"✅ Successfully added {pushed_count} new companies to Notion!")
+            if skipped_count > 0:
+                st.info(f"⏭️ Skipped {skipped_count} companies that were already in the database.")
