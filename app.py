@@ -134,6 +134,8 @@ def fetch_notion_data(token, db_id):
             (df["Position Score"] * w_p)
         ).round(2)
         df = df.sort_values("Quona Score", ascending=False).reset_index(drop=True)
+        # Adding a ranking column for the dropdown
+        df["Rank"] = df.index + 1
 
     return df
 
@@ -149,8 +151,25 @@ with tab1:
     if notion_df.empty:
         st.warning("No data found in Notion DB. Have you pushed any deals yet?")
     else:
+        # Create a dictionary for the dropdown formatting
         companies = notion_df["Company Name"].tolist()
-        selected_company = st.selectbox("Select a company to view the breakdown (Ordered by Score):", companies)
+
+        # 🆕 NEW: Using format_func to modify the dropdown UI
+        def format_dropdown(company_name):
+            # Find the row for this company to get its rank and score
+            row_data = notion_df[notion_df["Company Name"] == company_name].iloc[0]
+            rank = row_data["Rank"]
+            score = round(row_data["Quona Score"], 2)
+
+            # Formats like: "1. Revio (Score: 9.0)"
+            return f"#{rank} - {company_name} (Score: {score})"
+
+        selected_company = st.selectbox(
+            "Select a company to view the breakdown (Ordered by Score):", 
+            options=companies,
+            format_func=format_dropdown
+        )
+
         row = notion_df[notion_df["Company Name"] == selected_company].iloc[0]
 
         st.divider()
@@ -200,7 +219,6 @@ with tab1:
 with tab2:
     st.subheader("Generate Sourcing Prompt")
 
-    # 🆕 HARSH ANTI-HALLUCINATION PROMPT UPGRADE
     generated_prompt = f"""You are an elite VC Sourcing AI for Quona Capital. 
 You must search your knowledge base to identify EXACTLY {max_results} highly relevant REAL African fintech startups.
 
@@ -241,13 +259,13 @@ Each object must strictly have these keys exactly as named:
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {
-            "model": "gpt-4o",  # 🆕 UPGRADED FROM gpt-4o-mini TO AVOID HALLUCINATIONS
+            "model": "gpt-4o",  
             "response_format": { "type": "json_object" },
             "messages": [
                 {"role": "system", "content": "You are a strict JSON VC database engine that outputs facts without hallucinations. Your employment depends on not hallucinating late-stage companies as seed-stage."},
                 {"role": "user", "content": prompt_text}
             ],
-            "temperature": 0.1 # 🆕 LOWERED TEMPERATURE FOR MAXIMUM DETERMINISM
+            "temperature": 0.1 
         }
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code != 200: raise Exception(response.text)
