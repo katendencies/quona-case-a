@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import json
+import re
 
 st.set_page_config(page_title="AI Sourcing Agent", page_icon="🌍", layout="wide")
 st.title("🌍 Automated VC Sourcing Agent")
@@ -90,6 +91,7 @@ def fetch_notion_data(token, db_id):
             elif t == "number": return p.get("number")
             elif t == "url": return p.get("url")
             elif t == "checkbox": return p.get("checkbox")
+            elif t == "date" and p.get("date"): return p["date"].get("start")
             elif t == "formula":
                 form = p.get("formula", {})
                 form_type = form.get("type")
@@ -105,11 +107,12 @@ def fetch_notion_data(token, db_id):
         parsed_data.append({
             "Company Name": name,
             "HQ Country": get_text("HQ Country"),
-            "Markets Served": get_text("Markets Served"), # ADDED
+            "Markets Served": get_text("Markets Served"), 
             "Sector": get_text("Sector"),
             "Stage": get_text("Stage"),
             "Investors": get_text("Investors"),
             "Traction Proxy": get_text("Traction Proxy"),
+            "Seed Date": get_text("Seed Date"),
             "Market Score": float(get_text("Market Score (1-10)") or 0),
             "Traction Score": float(get_text("Traction Score (1-10)") or 0),
             "Founder Score": float(get_text("Founder Score (1-10)") or 0),
@@ -156,7 +159,7 @@ with tab1:
         with col_main:
             st.subheader(row["Company Name"])
             st.caption(f"📍 HQ: {row.get('HQ Country', 'N/A')} | 🌍 Markets: {row.get('Markets Served', 'N/A')} | 🏢 {row.get('Sector', 'N/A')} | 📈 Stage: {row.get('Stage', 'N/A')}")
-            st.markdown(f"**Investors:** {row.get('Investors', 'N/A')}")
+            st.markdown(f"**Seed Date:** {row.get('Seed Date', 'N/A')} | **Investors:** {row.get('Investors', 'N/A')}")
             st.markdown(f"**Traction:** {row.get('Traction Proxy', 'N/A')}")
 
             st.markdown("### 🚦 Filtering Criteria")
@@ -213,16 +216,12 @@ Each object must strictly have these keys exactly as named:
 "HQ Country" (string),
 "Markets Served" (string),
 "Founded Year" (number),
-"Seed Date" (string YYYY-MM),
+"Seed Date" (string format MUST be strictly "YYYY-MM-DD" e.g. "2023-01-01"),
 "Seed Amount ($m)" (number),
 "Investors" (string),
 "Sector" (string),
 "Traction Proxy" (string),
 "Crunchbase / Link" (string),
-"Passes Sector?" (Yes/No),
-"Passes Geography?" (Yes/No),
-"Passes Stage?" (Yes/No),
-"Passes Syndicate?" (Yes/No),
 "Market Score (1-10)" (number 1-10),
 "Traction Score (1-10)" (number 1-10),
 "Founder Score (1-10)" (number 1-10),
@@ -318,8 +317,15 @@ Each object must strictly have these keys exactly as named:
                     if pd.notnull(row.get("Markets Served")) and str(row.get("Markets Served")).strip():
                         payload["properties"]["Markets Served"] = {"rich_text": [{"text": {"content": str(row.get("Markets Served")).strip()}}]}
 
-                    if pd.notnull(row.get("Seed Date")) and str(row.get("Seed Date")).strip():
-                        payload["properties"]["Seed Date"] = {"rich_text": [{"text": {"content": str(row.get("Seed Date")).strip()}}]}
+                    # FIX: Correct date mapping for Notion API
+                    raw_date = str(row.get("Seed Date", "")).strip()
+                    if pd.notnull(row.get("Seed Date")) and raw_date:
+                        # Notion API requires strict ISO 8601 date format (YYYY-MM-DD)
+                        # We try to ensure it matches this format, otherwise skip date to avoid breaking the payload
+                        match = re.search(r'\d{4}-\d{2}-\d{2}', raw_date)
+                        if match:
+                            iso_date = match.group(0)
+                            payload["properties"]["Seed Date"] = {"date": {"start": iso_date}}
 
                     if pd.notnull(row.get("HQ Country")) and str(row.get("HQ Country")).strip():
                         payload["properties"]["HQ Country"] = {"select": {"name": str(row.get("HQ Country")).strip()[:100]}}
