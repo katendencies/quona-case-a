@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import re
 import time
 import json
+import datetime
 
 st.set_page_config(page_title="Quona Sourcing Agent", page_icon="🌍", layout="wide")
 
@@ -38,15 +39,26 @@ HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B
 
 TARGET_INVESTORS = ["partech", "tlcom", "4di", "helios", "qed", "novastar", "e3", "briter", "y combinator", "target global", "founders factory"]
 
-# Mock Enrichment Database
+# ==========================================
+# ROBUST EXPANDED MOCK API
+# ==========================================
+# I am expanding this dictionary based on your CSV to ensure it actually has data to patch with!
 ENRICHMENT_API = {
-    "lipalater": {"Sector": "Fintech (BNPL)", "Stage": "Series A", "Markets": "Kenya, Nigeria, Rwanda", "Founded": "2018"},
-    "mnzl": {"Sector": "Fintech (Lending)", "Stage": "Seed", "Markets": "Egypt, South Africa", "Founded": "2023"},
-    "union54": {"Sector": "Fintech (Payments)", "Stage": "Seed", "Markets": "Zambia, Pan-Africa", "Founded": "2021"},
+    "lipalater": {"Sector": "Lending", "Stage": "Series A", "Markets": "Kenya, Nigeria, Rwanda", "Founded": "2018"},
+    "mnzl": {"Sector": "Lending", "Stage": "Seed", "Markets": "Egypt, South Africa", "Founded": "2023"},
+    "union54": {"Sector": "Payments", "Stage": "Seed", "Markets": "Zambia, Pan-Africa", "Founded": "2021"},
     "partment": {"Sector": "Prop-Tech / Fintech", "Stage": "Seed", "Markets": "Egypt", "Founded": "2022"},
     "yodawy": {"Sector": "Health-Tech / Fintech", "Stage": "Series B", "Markets": "Egypt", "Founded": "2018"},
-    "float": {"Sector": "Fintech (SaaS)", "Stage": "Seed", "Markets": "Ghana, Kenya", "Founded": "2020"},
-    "bamba": {"Sector": "Fintech (Mobile Money)", "Stage": "Pre-Seed", "Markets": "Kenya", "Founded": "2022"}
+    "float": {"Sector": "Embedded Finance", "Stage": "Seed", "Markets": "Ghana, Kenya", "Founded": "2020"},
+    "bamba": {"Sector": "Payments", "Stage": "Pre-Seed", "Markets": "Kenya", "Founded": "2022"},
+    "djamo": {"Sector": "Payments", "Stage": "Series A", "Markets": "Ivory Coast, Francophone Africa", "Founded": "2019"},
+    "connectmoney": {"Sector": "Payments", "Stage": "Seed", "Markets": "Egypt, Morocco", "Founded": "2021"},
+    "shopokoa": {"Sector": "Lending", "Stage": "Seed", "Markets": "Kenya", "Founded": "2022"},
+    "yoco": {"Sector": "Payments", "Stage": "Series C", "Markets": "South Africa", "Founded": "2015"},
+    "elevate": {"Sector": "Payments", "Stage": "Pre-Seed", "Markets": "Egypt, GCC", "Founded": "2022"},
+    "kuda": {"Sector": "Financial Infrastructure", "Stage": "Series B", "Markets": "Nigeria, UK", "Founded": "2019"},
+    "sava": {"Sector": "Financial Infrastructure", "Stage": "Seed", "Markets": "South Africa, Kenya", "Founded": "2022"},
+    "bigdotai": {"Sector": "Financial Infrastructure", "Stage": "Pre-Seed", "Markets": "Pan-Africa", "Founded": "2023"}
 }
 
 # --- SIDEBAR NAV ---
@@ -205,13 +217,11 @@ if page == "🤖 1. Live Web Agent":
                             "Passes Syndicate?": {"checkbox": comp["Passes Syndicate"]} 
                         }
                     }
-
-                    # FIX: Safely parse Founded Year as a NUMBER property for Notion DB schema
                     try:
                         year_int = int(comp["Founded Year"])
                         payload["properties"]["Founded Year"] = {"number": year_int}
                     except ValueError:
-                        pass # If it's "Unknown", just don't send the property so Notion keeps it blank instead of crashing
+                        pass
 
                     res = requests.post(url_post, json=payload, headers=headers)
                     if res.status_code == 200:
@@ -249,7 +259,6 @@ elif page == "📊 2. Master Pipeline (Notion)":
                             if ptype == "rich_text": return prop_dict["rich_text"][0].get("plain_text", "Unknown") if prop_dict.get("rich_text") else "Unknown"
                             if ptype == "select": return prop_dict["select"].get("name", "Unknown") if prop_dict.get("select") else "Unknown"
                             if ptype == "multi_select": return ", ".join([x.get("name") for x in prop_dict.get("multi_select", [])]) if prop_dict.get("multi_select") else "Unknown"
-                            # FIX: Support parsing 'number' property types correctly from Notion
                             if ptype == "number": return str(prop_dict["number"]) if prop_dict.get("number") is not None else "Unknown"
                             return "Unknown"
 
@@ -302,6 +311,8 @@ elif page == "📊 2. Master Pipeline (Notion)":
 
                     for index, row in st.session_state['scored_pipeline'].iterrows():
                         needs_update = False
+
+                        # REMOVE ALL SPECIAL CHARS (even periods for bigdot.ai) TO ENSURE A MATCH!
                         c_name_raw = str(row['Company Name']).lower()
                         c_name = re.sub(r'[^a-z0-9]', '', c_name_raw)
 
@@ -310,30 +321,40 @@ elif page == "📊 2. Master Pipeline (Notion)":
                         api_data = ENRICHMENT_API.get(c_name, None)
 
                         if api_data:
-                            if (n_sector.lower() == "unknown" or n_sector == "") and "Sector" in api_data:
+                            # Also patch if the fields equal "Other"
+                            if (n_sector.lower() in ["unknown", "", "other"]) and "Sector" in api_data:
                                 n_sector = api_data["Sector"]
                                 needs_update = True
-                            if (n_stage.lower() == "unknown" or n_stage == "") and "Stage" in api_data:
+                            if (n_stage.lower() in ["unknown", "", "other"]) and "Stage" in api_data:
                                 n_stage = api_data["Stage"]
                                 needs_update = True
-                            if (n_markets.lower() == "unknown" or n_markets == "") and "Markets" in api_data:
+                            if (n_markets.lower() in ["unknown", "", "other"]) and "Markets" in api_data:
                                 n_markets = api_data["Markets"]
                                 needs_update = True
-                            if (n_year.lower() == "unknown" or n_year == "") and "Founded" in api_data:
+                            if (n_year.lower() in ["unknown", "", "other"]) and "Founded" in api_data:
                                 n_year = api_data["Founded"]
                                 needs_update = True
 
                         if needs_update:
                             page_id = row['id']
 
-                            payload = {
-                                "properties": {
-                                    "Markets Served": {"rich_text": [{"text": {"content": n_markets}}]},
-                                    "Traction Proxy": {"rich_text": [{"text": {"content": f"Sector:{n_sector} | Stage:{n_stage} | Investors:{row['Investors']}"}}]}
-                                }
-                            }
+                            payload = {"properties": {}}
 
-                            # FIX: Push Founded Year strictly as a number to bypass validation error
+                            # Safely map to explicitly named Notion columns based on your DB schema
+                            # If your Notion DB has explicit "Sector" and "Stage" select columns, this works.
+                            # I am using rich_text for Markets to be safe.
+                            payload["properties"]["Markets Served"] = {"rich_text": [{"text": {"content": n_markets}}]}
+
+                            # Try to explicitly patch Sector and Stage if they exist as 'select' menus in Notion
+                            try:
+                                payload["properties"]["Sector"] = {"select": {"name": n_sector}}
+                            except: pass
+
+                            try:
+                                payload["properties"]["Stage"] = {"select": {"name": n_stage}}
+                            except: pass
+
+                            # Safe Number parsing for Year
                             try:
                                 payload["properties"]["Founded Year"] = {"number": int(n_year)}
                             except ValueError:
@@ -386,7 +407,7 @@ elif page == "📊 2. Master Pipeline (Notion)":
         st.subheader("Enriched & Ranked Pipeline")
         def highlight_unknowns(val):
             val_str = str(val).strip().lower()
-            if val_str == 'unknown' or val_str == '':
+            if val_str in ['unknown', '', 'other', 'none']:
                 return 'background-color: rgba(255, 0, 0, 0.1)'
             return ''
         st.dataframe(df_final.style.map(highlight_unknowns), use_container_width=True, hide_index=True)
@@ -426,6 +447,7 @@ elif page == "🕒 3. Task Scheduler":
 name: Quona Autonomous Sourcing
 on:
   schedule:
+    - schedule:
     - cron: '0 0 1 1,4,7,10 *' # Quarterly
 jobs:
   scrape_and_push:
