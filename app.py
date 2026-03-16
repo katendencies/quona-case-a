@@ -199,15 +199,21 @@ with tab1:
 
 with tab2:
     st.subheader("Generate Sourcing Prompt")
-    generated_prompt = f"""You are a VC Sourcing AI for Quona Capital. 
-Search your knowledge base and identify EXACTLY {max_results} highly relevant African fintech startups.
 
-STRICT CRITERIA & ANTI-HALLUCINATION RULES:
+    # 🆕 HARSH ANTI-HALLUCINATION PROMPT UPGRADE
+    generated_prompt = f"""You are an elite VC Sourcing AI for Quona Capital. 
+You must search your knowledge base to identify EXACTLY {max_results} highly relevant REAL African fintech startups.
+
+STRICT CRITERIA & SEVERE ANTI-HALLUCINATION RULES:
 1. Target Geos: {target_geos}
 2. Target Sectors: {target_sectors}
 3. Ideal Co-Investors: {tier_1_vcs}
 4. Stage: Seed raised EXACTLY 1 to 3 years ago (NO Series A).
-5. DO NOT HALLUCINATE: Do not include late-stage unicorns. Only include actual Seed-stage companies.
+5. DO NOT HALLUCINATE: You are FORBIDDEN from including mega-unicorns or late-stage companies.
+   - DO NOT include: Paystack, Flutterwave, Chipper Cash, M-Pesa, Wave, OPay, Paga, Yoco, Kuda, Interswitch. 
+   - DO NOT invent fake funding rounds for these companies.
+   - DO NOT invent fake headquarters for these companies (e.g. Flutterwave is NOT HQ'd in Egypt).
+   - ONLY include authentic, actual seed-stage companies.
 
 You MUST output valid JSON with a single key `companies` containing a list of objects.
 Each object must strictly have these keys exactly as named:
@@ -235,13 +241,13 @@ Each object must strictly have these keys exactly as named:
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
         payload = {
-            "model": "gpt-4o-mini",
+            "model": "gpt-4o",  # 🆕 UPGRADED FROM gpt-4o-mini TO AVOID HALLUCINATIONS
             "response_format": { "type": "json_object" },
             "messages": [
-                {"role": "system", "content": "You are a strict JSON VC database engine that outputs facts without hallucinations."},
+                {"role": "system", "content": "You are a strict JSON VC database engine that outputs facts without hallucinations. Your employment depends on not hallucinating late-stage companies as seed-stage."},
                 {"role": "user", "content": prompt_text}
             ],
-            "temperature": 0.2 
+            "temperature": 0.1 # 🆕 LOWERED TEMPERATURE FOR MAXIMUM DETERMINISM
         }
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code != 200: raise Exception(response.text)
@@ -317,11 +323,8 @@ Each object must strictly have these keys exactly as named:
                     if pd.notnull(row.get("Markets Served")) and str(row.get("Markets Served")).strip():
                         payload["properties"]["Markets Served"] = {"rich_text": [{"text": {"content": str(row.get("Markets Served")).strip()}}]}
 
-                    # FIX: Correct date mapping for Notion API
                     raw_date = str(row.get("Seed Date", "")).strip()
                     if pd.notnull(row.get("Seed Date")) and raw_date:
-                        # Notion API requires strict ISO 8601 date format (YYYY-MM-DD)
-                        # We try to ensure it matches this format, otherwise skip date to avoid breaking the payload
                         match = re.search(r'\d{4}-\d{2}-\d{2}', raw_date)
                         if match:
                             iso_date = match.group(0)
