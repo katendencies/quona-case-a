@@ -28,14 +28,23 @@ with st.sidebar:
 
     st.divider()
     st.header("⚖️ Framework Weightings")
+
+    with st.expander("ℹ️ How are these scores defined?"):
+        st.markdown("""
+        **1. Market Opportunity**: Size of the addressable market, regulatory tailwinds, and macro trends.
+        **2. Early Traction**: Current user base, API volume, lending origination, or MoM growth.
+        **3. Founder Strength**: Domain expertise, second-time founders, and Tier-1 syndicate signal.
+        **4. Competitive Position**: Regulatory moats, pricing power, and Pan-African scaling potential.
+        """)
+
     weight_market = st.slider("Market Opportunity Weight", 0.0, 1.0, 0.25, 0.05)
     weight_traction = st.slider("Early Traction Weight", 0.0, 1.0, 0.25, 0.05)
     weight_founder = st.slider("Founder Strength Weight", 0.0, 1.0, 0.25, 0.05)
     weight_position = st.slider("Competitive Position Weight", 0.0, 1.0, 0.25, 0.05)
 
     total_weight = weight_market + weight_traction + weight_founder + weight_position
+    if total_weight == 0: total_weight = 1 
     w_m, w_t, w_f, w_p = weight_market/total_weight, weight_traction/total_weight, weight_founder/total_weight, weight_position/total_weight
-
 
 # --- NOTION DATA FETCHING ---
 @st.cache_data(ttl=60)
@@ -71,15 +80,23 @@ def fetch_notion_data(token, db_id):
 
         def get_text(prop_name):
             p = props.get(prop_name, {})
-            if p.get("type") == "title": return "".join([t.get("plain_text", "") for t in p.get("title", [])])
-            elif p.get("type") == "rich_text": return "".join([t.get("plain_text", "") for t in p.get("rich_text", [])])
-            elif p.get("type") == "select" and p.get("select"): return p["select"].get("name", "")
-            elif p.get("type") == "multi_select": return ", ".join([s.get("name", "") for s in p.get("multi_select", [])])
-            elif p.get("type") == "number": return p.get("number")
-            elif p.get("type") == "url": return p.get("url")
-            elif p.get("type") == "formula":
+            if not p: return None
+
+            t = p.get("type")
+            if t == "title": return "".join([x.get("plain_text", "") for x in p.get("title", [])])
+            elif t == "rich_text": return "".join([x.get("plain_text", "") for x in p.get("rich_text", [])])
+            elif t == "select" and p.get("select"): return p["select"].get("name", "")
+            elif t == "multi_select": return ", ".join([x.get("name", "") for x in p.get("multi_select", [])])
+            elif t == "number": return p.get("number")
+            elif t == "url": return p.get("url")
+            elif t == "checkbox": return p.get("checkbox")
+            elif t == "formula":
                 form = p.get("formula", {})
-                return form.get("string") or form.get("number") or form.get("boolean")
+                form_type = form.get("type")
+                if form_type == "string": return form.get("string")
+                elif form_type == "number": return form.get("number")
+                elif form_type == "boolean": return form.get("boolean")
+                return None
             return None
 
         name = get_text("Company Name")
@@ -88,6 +105,7 @@ def fetch_notion_data(token, db_id):
         parsed_data.append({
             "Company Name": name,
             "HQ Country": get_text("HQ Country"),
+            "Markets Served": get_text("Markets Served"), # ADDED
             "Sector": get_text("Sector"),
             "Stage": get_text("Stage"),
             "Investors": get_text("Investors"),
@@ -137,7 +155,7 @@ with tab1:
 
         with col_main:
             st.subheader(row["Company Name"])
-            st.caption(f"📍 {row.get('HQ Country', 'N/A')} | 🏢 {row.get('Sector', 'N/A')} | 📈 Stage: {row.get('Stage', 'N/A')}")
+            st.caption(f"📍 HQ: {row.get('HQ Country', 'N/A')} | 🌍 Markets: {row.get('Markets Served', 'N/A')} | 🏢 {row.get('Sector', 'N/A')} | 📈 Stage: {row.get('Stage', 'N/A')}")
             st.markdown(f"**Investors:** {row.get('Investors', 'N/A')}")
             st.markdown(f"**Traction:** {row.get('Traction Proxy', 'N/A')}")
 
@@ -145,9 +163,12 @@ with tab1:
             fc1, fc2, fc3, fc4 = st.columns(4)
 
             def render_filter(col, title, val):
-                is_pass = str(val).lower() in ["yes", "true", "✅"]
-                icon = "✅ Pass" if is_pass else "❌ Fail"
-                col.info(f"**{title}**\n{icon}")
+                if val is None or str(val).strip() == "" or str(val).lower() == "nan":
+                    col.info(f"**{title}**\n➖ Blank")
+                else:
+                    is_pass = str(val).lower() in ["yes", "true", "✅"]
+                    icon = "✅ Pass" if is_pass else "❌ Fail"
+                    col.info(f"**{title}**\n{icon}")
 
             render_filter(fc1, "Sector", row.get("Passes Sector?"))
             render_filter(fc2, "Geography", row.get("Passes Geography?"))
@@ -183,7 +204,7 @@ STRICT CRITERIA & ANTI-HALLUCINATION RULES:
 2. Target Sectors: {target_sectors}
 3. Ideal Co-Investors: {tier_1_vcs}
 4. Stage: Seed raised EXACTLY 1 to 3 years ago (NO Series A).
-5. DO NOT HALLUCINATE: Do not include late-stage unicorns (e.g. Flutterwave, Paystack, Chipper Cash, Yoco, Paga, M-Pesa). If they are Series A or later, EXCLUDE THEM. Only include actual Seed-stage companies.
+5. DO NOT HALLUCINATE: Do not include late-stage unicorns. Only include actual Seed-stage companies.
 
 You MUST output valid JSON with a single key `companies` containing a list of objects.
 Each object must strictly have these keys exactly as named:
@@ -250,7 +271,6 @@ Each object must strictly have these keys exactly as named:
                     cols_order = [
                         "Approve", "Company Name", "Stage", "HQ Country", "Markets Served", "Founded Year", 
                         "Seed Date", "Seed Amount ($m)", "Investors", "Sector", "Traction Proxy", "Crunchbase / Link", 
-                        "Passes Sector?", "Passes Geography?", "Passes Stage?", "Passes Syndicate?", 
                         "Market Score (1-10)", "Traction Score (1-10)", "Founder Score (1-10)", "Position Score (1-10)", "Quona Score"
                     ]
                     df = df[[c for c in cols_order if c in df.columns]]
@@ -289,14 +309,18 @@ Each object must strictly have these keys exactly as named:
                         }
                     }
 
-                    # FIX: Stage and Investors are rich_text in the live Notion schema, NOT select/multi-select
                     if pd.notnull(row.get("Stage")) and str(row.get("Stage")).strip():
                         payload["properties"]["Stage"] = {"rich_text": [{"text": {"content": str(row.get("Stage")).strip()[:100]}}]}
 
                     if pd.notnull(row.get("Investors")) and str(row.get("Investors")).strip():
                         payload["properties"]["Investors"] = {"rich_text": [{"text": {"content": str(row.get("Investors")).strip()}}]}
 
-                    # HQ Country and Sector are still Select fields
+                    if pd.notnull(row.get("Markets Served")) and str(row.get("Markets Served")).strip():
+                        payload["properties"]["Markets Served"] = {"rich_text": [{"text": {"content": str(row.get("Markets Served")).strip()}}]}
+
+                    if pd.notnull(row.get("Seed Date")) and str(row.get("Seed Date")).strip():
+                        payload["properties"]["Seed Date"] = {"rich_text": [{"text": {"content": str(row.get("Seed Date")).strip()}}]}
+
                     if pd.notnull(row.get("HQ Country")) and str(row.get("HQ Country")).strip():
                         payload["properties"]["HQ Country"] = {"select": {"name": str(row.get("HQ Country")).strip()[:100]}}
 
@@ -318,7 +342,6 @@ Each object must strictly have these keys exactly as named:
                     add_num("Traction Score (1-10)", "Traction Score (1-10)")
                     add_num("Founder Score (1-10)", "Founder Score (1-10)")
                     add_num("Position Score (1-10)", "Position Score (1-10)")
-                    add_num("Quona Score", "Quona Score")
 
                     res = requests.post("https://api.notion.com/v1/pages", json=payload, headers=headers)
                     if res.status_code == 200: pushed += 1
