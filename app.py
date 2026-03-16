@@ -13,27 +13,14 @@ st.set_page_config(page_title="Quona Sourcing Agent", page_icon="🌍", layout="
 # --- QUONA CAPITAL CORPORATE IDENTITY (CI) INJECTION ---
 st.markdown("""
     <style>
-    /* Quona Brand Colors: Contemporary Green, Bright Light Blue, Warm Grays */
-
     /* Base typography & Headers */
     html, body, [class*="css"] {
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
     }
 
-    h1 {
-        color: #2C3338 !important;
-        font-weight: 800 !important;
-        letter-spacing: -0.5px !important;
-    }
-
-    h2, h3 {
-        color: #2C3338 !important;
-        font-weight: 700 !important;
-    }
-
     /* Primary Buttons (Quona Green to Blue gradient or solid) */
     div.stButton > button:first-child {
-        background-color: #00C88C !important; /* Contemporary Green */
+        background-color: #00C88C !important; 
         color: white !important;
         border: none !important;
         border-radius: 6px !important;
@@ -43,41 +30,21 @@ st.markdown("""
     }
 
     div.stButton > button:first-child:hover {
-        background-color: #00A4FF !important; /* Bright Light Blue */
+        background-color: #00A4FF !important; 
         box-shadow: 0px 4px 12px rgba(0, 164, 255, 0.3) !important;
         transform: translateY(-1px);
     }
 
-    /* Sidebar Styling (Warm Grays) */
-    [data-testid="stSidebar"] {
-        background-color: #F8F9FA !important;
-        border-right: 1px solid #E9ECEF !important;
-    }
-
     /* Status Widget / Expanders styling */
     [data-testid="stStatusWidget"] {
-        background-color: #FFFFFF !important;
-        border: 1px solid #E9ECEF !important;
         border-left: 4px solid #00C88C !important;
         border-radius: 4px !important;
     }
 
-    /* Dataframe header */
-    th {
-        background-color: #F8F9FA !important;
-        color: #2C3338 !important;
-    }
-
-    /* Horizontal Dividers */
-    hr {
-        border-bottom: 2px solid #E9ECEF !important;
-    }
-
     /* Custom Info Box */
     .stAlert {
-        background-color: rgba(0, 164, 255, 0.05) !important;
+        background-color: rgba(0, 164, 255, 0.1) !important;
         border-left: 4px solid #00A4FF !important;
-        color: #2C3338 !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -89,8 +56,8 @@ HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B
 TARGET_INVESTORS = ["partech", "tlcom", "4di", "helios", "qed", "novastar", "e3", "briter", "y combinator", "target global", "founders factory"]
 
 # --- SIDEBAR BRANDING ---
-st.sidebar.markdown("<h2 style='text-align: center; color: #2C3338;'>QUONA</h2>", unsafe_allow_html=True)
-st.sidebar.markdown("<p style='text-align: center; font-size: 0.9em; color: #6C757D; margin-top: -15px;'>Fueling global fintech.</p>", unsafe_allow_html=True)
+st.sidebar.markdown("<h2 style='text-align: center; color: #00C88C; letter-spacing: 2px;'>QUONA</h2>", unsafe_allow_html=True)
+st.sidebar.markdown("<p style='text-align: center; font-size: 0.9em; margin-top: -15px;'>Fueling global fintech.</p>", unsafe_allow_html=True)
 st.sidebar.divider()
 
 page = st.sidebar.radio("Sourcing Engine Navigation", ["🤖 1. Live Web Agent", "📊 2. Master Pipeline (Notion)", "🕒 3. Task Scheduler"])
@@ -99,7 +66,7 @@ st.sidebar.caption("© 2026 Quona Capital Management LLC")
 
 if page == "🤖 1. Live Web Agent":
     st.title("Autonomous Sourcing Agent")
-    st.markdown("<p style='font-size: 1.1em; color: #495057;'>Executing multi-threaded intelligence gathering across 100% of required targets to fuel Quona's pipeline.</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size: 1.1em;'>Executing multi-threaded intelligence gathering across 100% of required targets to fuel Quona's pipeline.</p>", unsafe_allow_html=True)
     st.divider()
 
     if st.button("🚀 Deploy Multi-Source Agent (Manual Run)", type="primary"):
