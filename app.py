@@ -40,7 +40,6 @@ HF_API_URL = "https://api-inference.huggingface.co/models/mistralai/Mixtral-8x7B
 TARGET_INVESTORS = ["partech", "tlcom", "4di", "helios", "qed", "novastar", "e3", "briter", "y combinator", "target global", "founders factory"]
 
 # Mock Enrichment Database
-# Ensure exact matching logic by storing keys strictly as lowercase alpha-only text
 ENRICHMENT_API = {
     "lipalater": {"Sector": "Fintech (BNPL)", "Stage": "Series A", "Markets": "Kenya, Nigeria, Rwanda", "Founded": "2018"},
     "mnzl": {"Sector": "Fintech (Lending)", "Stage": "Seed", "Markets": "Egypt, South Africa", "Founded": "2023"},
@@ -115,11 +114,9 @@ if page == "🤖 1. Live Web Agent":
                     if res.get('status') == 'ok':
                         for item in res.get('items', [])[:rss_depth]:
                             raw_title = item.get('title', '')
-                            # Strip out conversational question words
                             clean_title = re.sub(r'^(How|Why|What|Should|Which|Announcing) ', '', raw_title, flags=re.IGNORECASE)
                             raw = f"{clean_title} - {item.get('description')}"
 
-                            # Filter for actual funding news to avoid spam
                             if bool(re.search(r'raise|fund|seed|invest|series|capital', raw.lower())) and not bool(re.search(r'meme|coin|crypto whale|podcast', raw.lower())):
                                 scraped_texts.append({"raw_text": raw[:250]+"...", "source": source_name, "link": item.get('link')})
                                 update_log(f"Scraped: {clean_title[:30]}...")
@@ -136,7 +133,6 @@ if page == "🤖 1. Live Web Agent":
                 raw_text = item['raw_text']
 
                 company, investors, sector, stage, markets, founded = "Unknown", "Undisclosed", "Unknown", "Unknown", "Unknown", "Unknown"
-
                 bad_company_words = ["we", "how", "why", "what", "startup", "african", "egyptian", "investors", "announcing", "undp", "africa", "disrupt", "the"]
 
                 prompt = f"""[INST] Extract ONLY the proper noun name of the startup getting funding.
@@ -152,7 +148,6 @@ if page == "🤖 1. Live Web Agent":
                         if "```" in json_str: json_str = json_str.split("```")[0]
                         extracted = json.loads(json_str)
                         c_candidate = extracted.get("Company Name", "Unknown")
-
                         if c_candidate.lower().strip() not in bad_company_words and not re.search(r'^\d+[kKmMbB]', c_candidate):
                             company = c_candidate
                 except: pass
@@ -165,10 +160,7 @@ if page == "🤖 1. Live Web Agent":
                             company = clean_w
                             break
 
-                # Fallback to make sure Partment is captured if "How Egyptian prop-tech startup Partment" text exists
                 if "partment" in raw_text.lower(): company = "Partment"
-
-                # Hard overrides for mock known data
                 if "LipaLater" in raw_text: company = "LipaLater"
                 if "MNZL" in raw_text: company = "MNZL"
                 if "Union54" in raw_text: company = "Union54"
@@ -264,6 +256,8 @@ elif page == "📊 2. Master Pipeline (Notion)":
 
                         traction_str = props.get("Traction Proxy", {}).get("rich_text", [{}])[0].get("plain_text", "") if props.get("Traction Proxy", {}).get("rich_text") else ""
                         sector, stage, investors = "Unknown", "Unknown", "Unknown"
+
+                        # Fix parsing for "Sector:Unknown" vs missing
                         if "|" in traction_str:
                             parts = traction_str.split("|")
                             for p in parts:
@@ -299,29 +293,31 @@ elif page == "📊 2. Master Pipeline (Notion)":
                     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
                     updates_made = 0
 
-                    # Fix: Make matching completely case-insensitive and strip all spaces/punctuation
                     for index, row in st.session_state['scored_pipeline'].iterrows():
                         needs_update = False
-                        # Scrub the company name from Notion so it matches the dict exactly (e.g. "Partment " -> "partment")
+                        # Extremely resilient name matching
                         c_name_raw = str(row['Company Name']).lower()
                         c_name = re.sub(r'[^a-z0-9]', '', c_name_raw)
 
                         n_sector, n_stage, n_markets, n_year = str(row['Sector']).strip(), str(row['Stage']).strip(), str(row['Markets']).strip(), str(row['Founded']).strip()
-                        api_data = ENRICHMENT_API.get(c_name, {})
 
-                        # Fix: Check for exactly 'Unknown' or empty string
-                        if (n_sector == "Unknown" or n_sector == "") and "Sector" in api_data:
-                            n_sector = api_data["Sector"]
-                            needs_update = True
-                        if (n_stage == "Unknown" or n_stage == "") and "Stage" in api_data:
-                            n_stage = api_data["Stage"]
-                            needs_update = True
-                        if (n_markets == "Unknown" or n_markets == "") and "Markets" in api_data:
-                            n_markets = api_data["Markets"]
-                            needs_update = True
-                        if (n_year == "Unknown" or n_year == "") and "Founded" in api_data:
-                            n_year = api_data["Founded"]
-                            needs_update = True
+                        # Match API
+                        api_data = ENRICHMENT_API.get(c_name, None)
+
+                        if api_data:
+                            # If we matched the API and the fields currently say "Unknown" or are blank, apply the update!
+                            if (n_sector.lower() == "unknown" or n_sector == "") and "Sector" in api_data:
+                                n_sector = api_data["Sector"]
+                                needs_update = True
+                            if (n_stage.lower() == "unknown" or n_stage == "") and "Stage" in api_data:
+                                n_stage = api_data["Stage"]
+                                needs_update = True
+                            if (n_markets.lower() == "unknown" or n_markets == "") and "Markets" in api_data:
+                                n_markets = api_data["Markets"]
+                                needs_update = True
+                            if (n_year.lower() == "unknown" or n_year == "") and "Founded" in api_data:
+                                n_year = api_data["Founded"]
+                                needs_update = True
 
                         if needs_update:
                             page_id = row['id']
@@ -329,7 +325,6 @@ elif page == "📊 2. Master Pipeline (Notion)":
                                 "properties": {
                                     "Markets Served": {"rich_text": [{"text": {"content": n_markets}}]},
                                     "Founded Year": {"rich_text": [{"text": {"content": n_year}}]},
-                                    # Ensure we save back using the exact traction proxy format so we can read it again later
                                     "Traction Proxy": {"rich_text": [{"text": {"content": f"Sector:{n_sector} | Stage:{n_stage} | Investors:{row['Investors']}"}}]}
                                 }
                             }
@@ -380,8 +375,9 @@ elif page == "📊 2. Master Pipeline (Notion)":
 
         st.subheader("Enriched & Ranked Pipeline")
         def highlight_unknowns(val):
-            # Clean string to check precisely
-            if str(val).strip() == 'Unknown' or str(val).strip() == '':
+            # Clean string to check precisely ignoring case
+            val_str = str(val).strip().lower()
+            if val_str == 'unknown' or val_str == '':
                 return 'background-color: rgba(255, 0, 0, 0.1)'
             return ''
         st.dataframe(df_final.style.map(highlight_unknowns), use_container_width=True, hide_index=True)
