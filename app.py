@@ -105,7 +105,6 @@ def fetch_notion_data(token, db_id):
 
     df = pd.DataFrame(parsed_data)
 
-    # Recalculate Quona Score dynamically based on user weights
     if not df.empty:
         df["Quona Score"] = (
             (df["Market Score"] * w_m) +
@@ -113,8 +112,6 @@ def fetch_notion_data(token, db_id):
             (df["Founder Score"] * w_f) +
             (df["Position Score"] * w_p)
         ).round(2)
-
-        # Sort by highest dynamic score
         df = df.sort_values("Quona Score", ascending=False).reset_index(drop=True)
 
     return df
@@ -122,7 +119,7 @@ def fetch_notion_data(token, db_id):
 notion_df = fetch_notion_data(NOTION_TOKEN, DATABASE_ID)
 
 # =========================================================
-# UI TABS: SOURCING VS NOTION DB VIEWER
+# UI TABS
 # =========================================================
 tab1, tab2 = st.tabs(["📊 Live Notion Viewer (CRM)", "🚀 AI Sourcing Engine"])
 
@@ -131,12 +128,8 @@ with tab1:
     if notion_df.empty:
         st.warning("No data found in Notion DB. Have you pushed any deals yet?")
     else:
-        # Get companies SORTED by Quona Score natively since df is sorted
         companies = notion_df["Company Name"].tolist()
-
-        # Highest scoring is first
         selected_company = st.selectbox("Select a company to view the breakdown (Ordered by Score):", companies)
-
         row = notion_df[notion_df["Company Name"] == selected_company].iloc[0]
 
         st.divider()
@@ -145,7 +138,6 @@ with tab1:
         with col_main:
             st.subheader(row["Company Name"])
             st.caption(f"📍 {row.get('HQ Country', 'N/A')} | 🏢 {row.get('Sector', 'N/A')} | 📈 Stage: {row.get('Stage', 'N/A')}")
-
             st.markdown(f"**Investors:** {row.get('Investors', 'N/A')}")
             st.markdown(f"**Traction:** {row.get('Traction Proxy', 'N/A')}")
 
@@ -174,16 +166,12 @@ with tab1:
 
             st.markdown(f"**Market ({(w_m*100):.0f}% weight):** {m_score}/10")
             st.progress(m_score / 10.0)
-
             st.markdown(f"**Traction ({(w_t*100):.0f}% weight):** {t_score}/10")
             st.progress(t_score / 10.0)
-
             st.markdown(f"**Founder ({(w_f*100):.0f}% weight):** {f_score}/10")
             st.progress(f_score / 10.0)
-
             st.markdown(f"**Position ({(w_p*100):.0f}% weight):** {p_score}/10")
             st.progress(p_score / 10.0)
-
 
 with tab2:
     st.subheader("Generate Sourcing Prompt")
@@ -206,7 +194,7 @@ Each object must strictly have these keys exactly as named:
 "Founded Year" (number),
 "Seed Date" (string YYYY-MM),
 "Seed Amount ($m)" (number),
-"Investors" (list of strings),
+"Investors" (string),
 "Sector" (string),
 "Traction Proxy" (string),
 "Crunchbase / Link" (string),
@@ -246,7 +234,6 @@ Each object must strictly have these keys exactly as named:
                 if "companies" in result and result["companies"]:
                     df = pd.DataFrame(result["companies"])
 
-                    # Dynamically calculate the Quona Score locally based on weights
                     df["Quona Score"] = (
                         (df["Market Score (1-10)"].astype(float) * w_m) +
                         (df["Traction Score (1-10)"].astype(float) * w_t) +
@@ -254,24 +241,18 @@ Each object must strictly have these keys exactly as named:
                         (df["Position Score (1-10)"].astype(float) * w_p)
                     ).round(2)
 
-                    # Ensure Investors list is converted to string for display
                     if "Investors" in df.columns:
-                        df["Investors"] = df["Investors"].apply(lambda x: ", ".join(x) if isinstance(x, list) else x)
+                        df["Investors"] = df["Investors"].apply(lambda x: ", ".join(x) if isinstance(x, list) else str(x))
 
-                    # Insert Approve column
                     df.insert(0, "Approve", True)
-
-                    # Sort by highest score by default
                     df = df.sort_values("Quona Score", ascending=False).reset_index(drop=True)
 
-                    # Force exact column order
                     cols_order = [
                         "Approve", "Company Name", "Stage", "HQ Country", "Markets Served", "Founded Year", 
                         "Seed Date", "Seed Amount ($m)", "Investors", "Sector", "Traction Proxy", "Crunchbase / Link", 
                         "Passes Sector?", "Passes Geography?", "Passes Stage?", "Passes Syndicate?", 
                         "Market Score (1-10)", "Traction Score (1-10)", "Founder Score (1-10)", "Position Score (1-10)", "Quona Score"
                     ]
-                    # Filter only columns that exist just in case LLM misses one
                     df = df[[c for c in cols_order if c in df.columns]]
 
                     st.session_state['llm_results'] = df
@@ -308,19 +289,19 @@ Each object must strictly have these keys exactly as named:
                         }
                     }
 
+                    # FIX: Stage and Investors are rich_text in the live Notion schema, NOT select/multi-select
                     if pd.notnull(row.get("Stage")) and str(row.get("Stage")).strip():
-                        payload["properties"]["Stage"] = {"select": {"name": str(row.get("Stage")).strip()[:100]}}
+                        payload["properties"]["Stage"] = {"rich_text": [{"text": {"content": str(row.get("Stage")).strip()[:100]}}]}
 
+                    if pd.notnull(row.get("Investors")) and str(row.get("Investors")).strip():
+                        payload["properties"]["Investors"] = {"rich_text": [{"text": {"content": str(row.get("Investors")).strip()}}]}
+
+                    # HQ Country and Sector are still Select fields
                     if pd.notnull(row.get("HQ Country")) and str(row.get("HQ Country")).strip():
                         payload["properties"]["HQ Country"] = {"select": {"name": str(row.get("HQ Country")).strip()[:100]}}
 
                     if pd.notnull(row.get("Sector")) and str(row.get("Sector")).strip():
                         payload["properties"]["Sector"] = {"select": {"name": str(row.get("Sector")).strip()[:100]}}
-
-                    if pd.notnull(row.get("Investors")) and str(row.get("Investors")).strip():
-                        inv_string = str(row.get("Investors"))
-                        inv_list = [i.strip()[:100] for i in inv_string.split(",") if i.strip()]
-                        payload["properties"]["Investors"] = {"multi_select": [{"name": i} for i in inv_list]}
 
                     if pd.notnull(row.get("Crunchbase / Link")) and str(row.get("Crunchbase / Link")).startswith("http"):
                         payload["properties"]["Crunchbase / Link"] = {"url": str(row.get("Crunchbase / Link"))}
