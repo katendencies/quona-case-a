@@ -220,8 +220,11 @@ if page == "🤖 1. Live Web Agent":
                             "Passes Syndicate?": {"checkbox": comp["Passes Syndicate"]} 
                         }
                     }
-                    requests.post(url_post, json=payload, headers=headers)
-                    added += 1
+                    res = requests.post(url_post, json=payload, headers=headers)
+                    if res.status_code == 200:
+                        added += 1
+                    else:
+                        st.error(f"Error pushing {c_name}: {res.text}")
                 st.success(f"✅ Pushed {added} new deals! Head to Tab 2 to Enrich & Score.")
 
 
@@ -250,21 +253,35 @@ elif page == "📊 2. Master Pipeline (Notion)":
                         name = props.get("Company Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Company Name", {}).get("title") else ""
                         if not name: continue
 
-                        markets = props.get("Markets Served", {}).get("rich_text", [{}])[0].get("plain_text", "") if props.get("Markets Served", {}).get("rich_text") else "Unknown"
-                        year = props.get("Founded Year", {}).get("rich_text", [{}])[0].get("plain_text", "") if props.get("Founded Year", {}).get("rich_text") else "Unknown"
+                        # Extremely robust property extractor for any Notion property type
+                        def extract_val(prop_dict):
+                            if not prop_dict: return "Unknown"
+                            ptype = prop_dict.get("type", "")
+                            if ptype == "rich_text": return prop_dict["rich_text"][0].get("plain_text", "Unknown") if prop_dict.get("rich_text") else "Unknown"
+                            if ptype == "select": return prop_dict["select"].get("name", "Unknown") if prop_dict.get("select") else "Unknown"
+                            if ptype == "multi_select": return ", ".join([x.get("name") for x in prop_dict.get("multi_select", [])]) if prop_dict.get("multi_select") else "Unknown"
+                            return "Unknown"
+
+                        markets = extract_val(props.get("Markets Served"))
+                        year = extract_val(props.get("Founded Year"))
+
                         passes_synd = props.get("Passes Syndicate?", {}).get("checkbox", False)
+                        if "Passes Syndicate" in props and "Passes Syndicate?" not in props:
+                            passes_synd = props.get("Passes Syndicate", {}).get("checkbox", False)
 
-                        traction_str = props.get("Traction Proxy", {}).get("rich_text", [{}])[0].get("plain_text", "") if props.get("Traction Proxy", {}).get("rich_text") else ""
-                        sector, stage, investors = "Unknown", "Unknown", "Unknown"
+                        # Smart Fallback: Check explicit columns first, then fallback to Traction Proxy
+                        sector = extract_val(props.get("Sector"))
+                        stage = extract_val(props.get("Stage"))
+                        investors = extract_val(props.get("Investors"))
 
-                        # Fix parsing for "Sector:Unknown" vs missing
-                        if "|" in traction_str:
+                        traction_str = extract_val(props.get("Traction Proxy"))
+                        if (sector == "Unknown" or stage == "Unknown") and "|" in traction_str:
                             parts = traction_str.split("|")
                             for p in parts:
-                                if "Sector:" in p: sector = p.split("Sector:")[1].strip()
-                                if "Stage:" in p: stage = p.split("Stage:")[1].strip()
-                                if "Investors:" in p: investors = p.split("Investors:")[1].strip()
-                        else:
+                                if "Sector:" in p and sector == "Unknown": sector = p.split("Sector:")[1].strip()
+                                if "Stage:" in p and stage == "Unknown": stage = p.split("Stage:")[1].strip()
+                                if "Investors:" in p and investors == "Unknown": investors = p.split("Investors:")[1].strip()
+                        elif investors == "Unknown" and traction_str != "Unknown":
                             investors = traction_str
 
                         score = calculate_conviction_score(sector, stage, passes_synd, markets)
@@ -278,7 +295,8 @@ elif page == "📊 2. Master Pipeline (Notion)":
                             "Founded": year,
                             "Investors": investors,
                             "Score": score,
-                            "Target VCs?": "✅" if passes_synd else "❌"
+                            "Target VCs?": "✅" if passes_synd else "❌",
+                            "raw_props": props # Save raw props to dynamically handle DB Schema in PATCH
                         })
 
                     if notion_data:
@@ -292,20 +310,18 @@ elif page == "📊 2. Master Pipeline (Notion)":
                 with st.spinner("Querying Crunchbase/Clearbit APIs for missing fields..."):
                     headers = {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
                     updates_made = 0
+                    api_errors = []
 
                     for index, row in st.session_state['scored_pipeline'].iterrows():
                         needs_update = False
-                        # Extremely resilient name matching
                         c_name_raw = str(row['Company Name']).lower()
                         c_name = re.sub(r'[^a-z0-9]', '', c_name_raw)
 
                         n_sector, n_stage, n_markets, n_year = str(row['Sector']).strip(), str(row['Stage']).strip(), str(row['Markets']).strip(), str(row['Founded']).strip()
 
-                        # Match API
                         api_data = ENRICHMENT_API.get(c_name, None)
 
                         if api_data:
-                            # If we matched the API and the fields currently say "Unknown" or are blank, apply the update!
                             if (n_sector.lower() == "unknown" or n_sector == "") and "Sector" in api_data:
                                 n_sector = api_data["Sector"]
                                 needs_update = True
@@ -321,20 +337,42 @@ elif page == "📊 2. Master Pipeline (Notion)":
 
                         if needs_update:
                             page_id = row['id']
-                            payload = {
-                                "properties": {
-                                    "Markets Served": {"rich_text": [{"text": {"content": n_markets}}]},
-                                    "Founded Year": {"rich_text": [{"text": {"content": n_year}}]},
-                                    "Traction Proxy": {"rich_text": [{"text": {"content": f"Sector:{n_sector} | Stage:{n_stage} | Investors:{row['Investors']}"}}]}
-                                }
-                            }
+                            raw_props = row['raw_props']
+
+                            # Helper to format data precisely as the DB schema expects it (so PATCH doesn't crash)
+                            def build_patch_prop(prop_name, new_val):
+                                if prop_name not in raw_props: return {"rich_text": [{"text": {"content": new_val}}]}
+                                ptype = raw_props[prop_name].get("type", "rich_text")
+                                if ptype == "select": return {"select": {"name": new_val}}
+                                if ptype == "multi_select": return {"multi_select": [{"name": v.strip()} for v in new_val.split(",")]}
+                                return {"rich_text": [{"text": {"content": new_val}}]}
+
+                            payload = {"properties": {}}
+                            if n_markets and n_markets.lower() != "unknown": payload["properties"]["Markets Served"] = build_patch_prop("Markets Served", n_markets)
+                            if n_year and n_year.lower() != "unknown": payload["properties"]["Founded Year"] = build_patch_prop("Founded Year", n_year)
+
+                            # If explicit columns exist in Notion, write to them directly!
+                            if "Sector" in raw_props: payload["properties"]["Sector"] = build_patch_prop("Sector", n_sector)
+                            if "Stage" in raw_props: payload["properties"]["Stage"] = build_patch_prop("Stage", n_stage)
+
+                            # Update Traction proxy fallback if it exists
+                            if "Traction Proxy" in raw_props:
+                                payload["properties"]["Traction Proxy"] = build_patch_prop("Traction Proxy", f"Sector:{n_sector} | Stage:{n_stage} | Investors:{row['Investors']}")
+
                             res = requests.patch(f"https://api.notion.com/v1/pages/{page_id}", json=payload, headers=headers)
-                            if res.status_code == 200: updates_made += 1
+                            if res.status_code == 200:
+                                updates_made += 1
+                            else:
+                                api_errors.append(f"{row['Company Name']}: {res.text}")
                             time.sleep(0.2)
 
                     if updates_made > 0:
                         st.success(f"⚡ Enriched {updates_made} records! Please click 'Fetch Pipeline' again to see updated scores.")
-                    else:
+                    if api_errors:
+                        st.error("Some records failed to update due to Notion DB schema mismatches. Expand for details:")
+                        for err in api_errors:
+                            st.caption(err)
+                    if updates_made == 0 and not api_errors:
                         st.info("No missing fields required enrichment (or company not in API mock).")
             else:
                 st.warning("Please fetch the pipeline first.")
@@ -356,7 +394,8 @@ elif page == "📊 2. Master Pipeline (Notion)":
                 st.success(f"🧹 Removed {len(to_archive)} duplicates.")
 
     if 'scored_pipeline' in st.session_state:
-        df_final = st.session_state['scored_pipeline'].drop(columns=['id']).sort_values('Score', ascending=False)
+        # Drop the raw_props column before displaying so it doesn't clutter the UI
+        df_final = st.session_state['scored_pipeline'].drop(columns=['id', 'raw_props']).sort_values('Score', ascending=False)
         st.divider()
 
         # --- 🏆 DEEP DIVE RECOMMENDATION CARD ---
@@ -375,7 +414,6 @@ elif page == "📊 2. Master Pipeline (Notion)":
 
         st.subheader("Enriched & Ranked Pipeline")
         def highlight_unknowns(val):
-            # Clean string to check precisely ignoring case
             val_str = str(val).strip().lower()
             if val_str == 'unknown' or val_str == '':
                 return 'background-color: rgba(255, 0, 0, 0.1)'
